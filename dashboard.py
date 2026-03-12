@@ -346,15 +346,16 @@ def _render_manage_partners(user_dir: Path, username: str):
 
     st.divider()
 
-    # Add partner
+    # Add partner (using a form so text input + button submit together)
     st.markdown("#### Add Partner")
-    new_partner = st.text_input(
-        "Instagram username or URL",
-        placeholder="e.g. fedmkt or https://instagram.com/fedmkt",
-        key="add_partner_input",
-    )
+    with st.form("add_partner_form", clear_on_submit=True):
+        new_partner = st.text_input(
+            "Instagram username or URL",
+            placeholder="e.g. fedmkt or https://instagram.com/fedmkt",
+        )
+        submitted = st.form_submit_button("Add Partner", type="primary")
 
-    if st.button("Add Partner", type="primary") and new_partner:
+    if submitted and new_partner:
         clean = new_partner.strip().lstrip("@").split("?")[0].split("/")[-1].lower()
         if clean and clean not in partners:
             partners.append(clean)
@@ -363,6 +364,8 @@ def _render_manage_partners(user_dir: Path, username: str):
             st.rerun()
         elif clean in partners:
             st.warning(f"@{clean} is already in your list")
+    elif submitted:
+        st.warning("Please enter a username")
 
     st.divider()
 
