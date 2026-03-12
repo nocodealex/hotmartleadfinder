@@ -21,6 +21,15 @@ def _get_client() -> Client:
     if _client is None:
         url = os.environ.get("SUPABASE_URL", "")
         key = os.environ.get("SUPABASE_KEY", "")
+
+        if not url or not key:
+            try:
+                import streamlit as st
+                url = url or st.secrets.get("SUPABASE_URL", "")
+                key = key or st.secrets.get("SUPABASE_KEY", "")
+            except Exception:
+                pass
+
         if not url or not key:
             raise RuntimeError(
                 "SUPABASE_URL and SUPABASE_KEY must be set. "
