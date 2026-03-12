@@ -1,0 +1,70 @@
+-- Supabase setup for Whop Intro Dashboard
+-- Paste this into the Supabase SQL Editor (supabase.com > your project > SQL Editor)
+
+-- Users
+create table if not exists users (
+    name text primary key,
+    created_at timestamptz default now()
+);
+
+-- Partners (referral partner IG accounts per user)
+create table if not exists partners (
+    id uuid primary key default gen_random_uuid(),
+    user_name text not null references users(name) on delete cascade,
+    ig_username text not null,
+    created_at timestamptz default now(),
+    unique(user_name, ig_username)
+);
+
+-- Prospects (qualified leads per user)
+create table if not exists prospects (
+    id uuid primary key default gen_random_uuid(),
+    user_name text not null references users(name) on delete cascade,
+    username text not null,
+    full_name text,
+    bio text,
+    follower_count integer,
+    overall_score real,
+    tier text,
+    classification text,
+    niche text,
+    lead_type text,
+    instagram_url text,
+    followed_by_partners jsonb,
+    num_partners_connected integer,
+    partner_list text,
+    created_at timestamptz default now()
+);
+
+create index if not exists idx_prospects_user on prospects(user_name);
+
+-- Outreach tracking per user
+create table if not exists outreach (
+    id uuid primary key default gen_random_uuid(),
+    user_name text not null references users(name) on delete cascade,
+    prospect_username text not null,
+    status text default 'Not Contacted',
+    notes text default '',
+    updated_at timestamptz default now(),
+    unique(user_name, prospect_username)
+);
+
+-- Per-user API keys
+create table if not exists api_keys (
+    id uuid primary key default gen_random_uuid(),
+    user_name text not null references users(name) on delete cascade unique,
+    rapidapi_key text default '',
+    anthropic_api_key text default '',
+    apify_api_token text default '',
+    updated_at timestamptz default now()
+);
+
+-- Cached partner following lists
+create table if not exists following_cache (
+    id uuid primary key default gen_random_uuid(),
+    user_name text not null references users(name) on delete cascade,
+    partner_username text not null,
+    following_data jsonb,
+    created_at timestamptz default now(),
+    unique(user_name, partner_username)
+);
