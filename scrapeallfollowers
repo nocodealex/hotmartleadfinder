@@ -1,0 +1,262 @@
+"""
+Scrape full follower lists for all referral partners using thenetaji actor,
+then cross-reference with leads to find warm intro opportunities.
+
+Caches results per partner so we can resume if interrupted.
+"""
+
+import os, requests, json, time, sys, pandas as pd
+from pathlib import Path
+
+TOKEN = os.getenv("APIFY_API_TOKEN", "")
+BASE  = 'https://api.apify.com/v2'
+ACTOR = 'thenetaji~instagram-followers-followings-scraper'
+CACHE = Path('data/partner_followers')
+CACHE.mkdir(parents=True, exist_ok=True)
+
+PARTNERS = [
+    'alexis_bautista_sanchez',
+    'fedmkt',
+    'yanvispo',
+    'diego.nxt',
+    'rodrigomajarin',
+    'sam.vilanova',
+    'davituru',
+]
+
+EXCLUDE = {
+    'alexis_bautista_sanchez', 'fedmkt', 'yanvispo', 'diego.nxt',
+    'rodrigomajarin', 'sam.vilanova', 'davituru',
+    'aymon_holth', 'nocode.alex',
+}
+
+# We already have alexis data from the earlier thenetaji run (dataset zmi3hXttYixbUUROs)
+# Let's save it to cache first, then scrape the rest
+
+
+def fetch_dataset(dsid):
+    """Fetch all items from an Apify dataset."""
+    items = []
+    offset = 0
+    while True:
+        resp = requests.get(
+            f'{BASE}/datasets/{dsid}/items?token={TOKEN}&limit=1000&offset={offset}',
+            timeout=120,
+        )
+        if resp.status_code != 200 or not resp.text.strip():
+            break
+        try:
+            batch = resp.json()
+        except Exception:
+            break
+        if not isinstance(batch, list) or not batch:
+            break
+        items.extend(batch)
+        offset += len(batch)
+        if len(batch) < 1000:
+            break
+    return items
+
+
+def scrape_followers(username, max_items=50000):
+    """Scrape followers for a partner. Returns list of follower usernames."""
+    cache_file = CACHE / f'{username}.json'
+    if cache_file.exists():
+        cached = json.loads(cache_file.read_text())
+        print(f'  [@{username}] Loaded {len(cached)} followers from cache')
+        return cached
+
+    print(f'  [@{username}] Starting Apify follower scrape...')
+    run_input = {
+        'username': [username],
+        'scrape_type': 'followers',
+        'maxItem': max_items,
+        'maxItems': max_items,
+    }
+
+    resp = requests.post(
+        f'{BASE}/acts/{ACTOR}/runs?token={TOKEN}',
+        json=run_input,
+        headers={'Content-Type': 'application/json'},
+        timeout=30,
+    )
+    if not resp.ok:
+        print(f'  [@{username}] ERROR starting: {resp.status_code} {resp.text[:200]}')
+        return []
+
+    run_id = resp.json().get('data', {}).get('id')
+    print(f'  [@{username}] Run started: {run_id}')
+
+    # Poll until done
+    max_wait = 3600  # 1 hour max per partner
+    waited = 0
+    poll = 10
+    last_count = 0
+    stall_time = 0
+
+    while waited < max_wait:
+        time.sleep(poll)
+        waited += poll
+        try:
+            resp = requests.get(f'{BASE}/acts/{ACTOR}/runs/{run_id}?token={TOKEN}', timeout=15)
+            d = resp.json().get('data', {})
+            status = d.get('status', '?')
+            cost = d.get('usageTotalUsd', 0)
+            dsid = d.get('defaultDatasetId', '')
+            count = 0
+            if dsid:
+                dr = requests.get(f'{BASE}/datasets/{dsid}?token={TOKEN}', timeout=10)
+                if dr.ok:
+                    count = dr.json().get('data', {}).get('itemCount', 0)
+        except Exception:
+            continue
+
+        if count > last_count:
+            stall_time = 0
+            last_count = count
+        else:
+            stall_time += poll
+
+        if waited % 30 == 0:
+            print(f'  [@{username}] {waited}s: {status} | {count} items | ${cost:.2f}')
+
+        if status in ('SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'):
+            print(f'  [@{username}] Done: {status} | {count} items | ${cost:.2f}')
+            break
+
+        # If stalled for 10 min, abort
+        if stall_time >= 600:
+            print(f'  [@{username}] Stalled for 10 min at {count} items, aborting...')
+            requests.post(f'{BASE}/acts/{ACTOR}/runs/{run_id}/abort?token={TOKEN}')
+            time.sleep(5)
+            break
+
+    if not dsid:
+        return []
+
+    # Fetch results
+    items = fetch_dataset(dsid)
+    print(f'  [@{username}] Fetched {len(items)} raw items from dataset')
+
+    # Extract usernames
+    usernames = []
+    for item in items:
+        uname = item.get('username', '')
+        if uname:
+            usernames.append(uname.lower())
+
+    usernames = list(set(usernames))  # dedupe
+    print(f'  [@{username}] {len(usernames)} unique follower usernames')
+
+    # Cache
+    cache_file.write_text(json.dumps(usernames))
+    return usernames
+
+
+def main():
+    # Step 0: Save alexis data from earlier run if not cached
+    alexis_cache = CACHE / 'alexis_bautista_sanchez.json'
+    if not alexis_cache.exists():
+        print('Fetching cached alexis_bautista_sanchez data from earlier run...')
+        items = fetch_dataset('zmi3hXttYixbUUROs')
+        usernames = list(set(
+            item.get('username', '').lower()
+            for item in items
+            if item.get('username')
+        ))
+        alexis_cache.write_text(json.dumps(usernames))
+        print(f'  Saved {len(usernames)} followers to cache')
+
+    # Step 1: Scrape followers for each partner
+    print('\n' + '='*60)
+    print('  SCRAPING FOLLOWER LISTS FOR ALL PARTNERS')
+    print('='*60)
+
+    partner_followers = {}
+    for partner in PARTNERS:
+        print(f'\n--- @{partner} ---')
+        followers = scrape_followers(partner)
+        partner_followers[partner] = set(followers)
+
+    # Step 2: Cross-reference with leads
+    print('\n' + '='*60)
+    print('  CROSS-REFERENCING WITH LEADS')
+    print('='*60)
+
+    df = pd.read_csv('data/leads.csv')
+    lead_usernames = set(df['username'].str.lower())
+    print(f'\nLeads: {len(lead_usernames)}')
+    print('Followers per partner:')
+    for p, fs in sorted(partner_followers.items()):
+        print(f'  @{p}: {len(fs)}')
+
+    all_matches = {}
+    for partner, followers in partner_followers.items():
+        matches = lead_usernames & followers
+        for m in matches:
+            if m in EXCLUDE:
+                continue
+            all_matches.setdefault(m, []).append(partner)
+
+    # Step 3: Build results
+    print(f'\n{"="*70}')
+    print(f'  {len(all_matches)} LEADS follow at least one referral partner')
+    print(f'{"="*70}\n')
+
+    tier_map = {"tier1_whale": "WHALE", "tier2_agency": "AGENCY",
+                 "tier3_affiliate": "AFFIL", "tier4_seller": "SELLER"}
+    niche_map = {"business_coaching": "BIZ", "marketing": "MKT",
+                  "financial_education": "FIN", "personal_development": "DEV",
+                  "health_fitness": "FIT", "education": "EDU"}
+
+    results = []
+    for username, partners in sorted(all_matches.items(), key=lambda x: (-len(x[1]), -df[df['username'].str.lower()==x[0]].iloc[0].get('overall_score',0) if not df[df['username'].str.lower()==x[0]].empty else 0)):
+        lead_row = df[df['username'].str.lower() == username]
+        if lead_row.empty:
+            continue
+        lead = lead_row.iloc[0]
+        score = lead.get('overall_score', 0)
+        tier = lead.get('tier', '')
+        niche = lead.get('niche', '')
+        fc = lead.get('follower_count', 0)
+
+        foll = '-'
+        if pd.notna(fc) and fc > 0:
+            if fc >= 1_000_000: foll = f'{fc/1_000_000:.1f}M'
+            elif fc >= 1_000: foll = f'{fc/1_000:.1f}K'
+            else: foll = str(int(fc))
+
+        partner_list = ', '.join(f'@{p}' for p in partners)
+        results.append({
+            'username': lead['username'],
+            'full_name': lead.get('full_name', ''),
+            'overall_score': score,
+            'tier': tier,
+            'niche': niche,
+            'classification': lead.get('classification', ''),
+            'follower_count': fc,
+            'instagram_url': f"https://instagram.com/{lead['username']}",
+            'follows_partners': partners,
+            'num_partner_connections': len(partners),
+            'partner_list': partner_list,
+            'bio': lead.get('bio', ''),
+        })
+
+        print(f'  @{lead["username"]:<25} score:{score:.2f}  {tier_map.get(tier,"?"):<7} {niche_map.get(niche,"?"):<5} {foll:>8}  follows: {partner_list}')
+
+    # Save
+    pd.DataFrame(results).to_csv('data/intro_matches.csv', index=False)
+    with open('data/intro_matches.json', 'w') as f:
+        json.dump(results, f, indent=2, default=str)
+    print(f'\n  Saved to data/intro_matches.csv & data/intro_matches.json')
+
+    # Breakdown
+    print(f'\n  PARTNER BREAKDOWN:')
+    for partner in PARTNERS:
+        count = sum(1 for r in results if partner in r['follows_partners'])
+        total = len(partner_followers.get(partner, set()))
+        print(f'    @{partner:<28} {count} leads follow them ({total} followers scraped)')
+
+
+if __name__ == '__main__':
+    main()
