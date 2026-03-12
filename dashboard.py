@@ -2,22 +2,21 @@
 Whop Prospect Intro Dashboard — Multi-user Streamlit app.
 
 Each user manages their own referral partner list, runs scans,
-and sees isolated prospect results. Pipedrive CRM is shared.
+and sees isolated prospect results. Data persists in Supabase.
+Pipedrive CRM enrichment is shared.
 
 Usage:
     streamlit run dashboard.py
 """
 
 import json
-from pathlib import Path
 from datetime import datetime, timezone
 
 import streamlit as st
 import pandas as pd
 
 import config
-
-USERS_DIR = config.DATA_DIR / "users"
+import supabase_db as db
 
 TIER_LABELS = {
     "tier1_whale": "Whale",
@@ -49,87 +48,17 @@ OUTREACH_STATUSES = [
 ]
 
 
-# ── User management ─────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────
 
-def get_user_list() -> list[str]:
-    USERS_DIR.mkdir(parents=True, exist_ok=True)
-    return sorted([
-        d.name for d in USERS_DIR.iterdir()
-        if d.is_dir() and not d.name.startswith(".")
-    ])
-
-
-def get_user_dir(username: str) -> Path:
-    user_dir = USERS_DIR / username
-    user_dir.mkdir(parents=True, exist_ok=True)
-    return user_dir
-
-
-def load_user_partners(user_dir: Path) -> list[str]:
-    partners_file = user_dir / "partners.json"
-    if partners_file.exists():
-        try:
-            return json.loads(partners_file.read_text())
-        except (json.JSONDecodeError, IOError):
-            pass
-    return []
-
-
-def save_user_partners(user_dir: Path, partners: list[str]):
-    (user_dir / "partners.json").write_text(json.dumps(partners, indent=2))
-
-
-def load_user_prospects(user_dir: Path) -> list[dict]:
-    prospects_file = user_dir / "prospects.json"
-    if prospects_file.exists():
-        try:
-            return json.loads(prospects_file.read_text())
-        except (json.JSONDecodeError, IOError):
-            pass
-    return []
-
-
-def load_user_outreach(user_dir: Path) -> dict:
-    outreach_file = user_dir / "outreach.json"
-    if outreach_file.exists():
-        try:
-            return json.loads(outreach_file.read_text())
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {}
-
-
-def save_user_outreach(user_dir: Path, data: dict):
-    (user_dir / "outreach.json").write_text(
-        json.dumps(data, indent=2, default=str, ensure_ascii=False)
-    )
-
-
-def load_user_api_keys(user_dir: Path) -> dict:
-    keys_file = user_dir / "api_keys.json"
-    if keys_file.exists():
-        try:
-            return json.loads(keys_file.read_text())
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {}
-
-
-def save_user_api_keys(user_dir: Path, keys: dict):
-    (user_dir / "api_keys.json").write_text(json.dumps(keys, indent=2))
-
-
-def get_effective_api_keys(user_dir: Path) -> dict:
+def get_effective_api_keys(user: str) -> dict:
     """Return user's API keys, falling back to global config for any missing ones."""
-    user_keys = load_user_api_keys(user_dir)
+    user_keys = db.load_api_keys(user)
     return {
         "rapidapi_key": user_keys.get("rapidapi_key") or config.RAPIDAPI_KEY,
         "anthropic_api_key": user_keys.get("anthropic_api_key") or config.ANTHROPIC_API_KEY,
         "apify_api_token": user_keys.get("apify_api_token") or config.APIFY_API_TOKEN,
     }
 
-
-# ── Helpers ──────────────────────────────────────────────────────────
 
 def format_followers(count) -> str:
     if not count or count <= 0:
@@ -165,7 +94,7 @@ def main():
     # ── User selector (sidebar top) ──────────────────────────────────
     st.sidebar.title("Whop Intro Dashboard")
 
-    users = get_user_list()
+    users = db.get_user_list()
 
     if "current_user" not in st.session_state:
         st.session_state.current_user = users[0] if users else ""
@@ -192,7 +121,7 @@ def main():
     if st.sidebar.button("Create User") and new_user:
         clean_name = new_user.strip().lower().replace(" ", "_")
         if clean_name:
-            get_user_dir(clean_name)
+            db.create_user(clean_name)
             st.session_state.current_user = clean_name
             st.rerun()
 
@@ -202,7 +131,6 @@ def main():
         return
 
     current_user = st.session_state.current_user
-    user_dir = get_user_dir(current_user)
 
     st.title(f"Whop Intro Dashboard — {current_user.title()}")
 
@@ -217,21 +145,21 @@ def main():
     ])
 
     with tabs[0]:
-        _render_manage_partners(user_dir, current_user)
+        _render_manage_partners(current_user)
 
     with tabs[5]:
-        _render_settings(user_dir, current_user)
+        _render_settings(current_user)
 
     # Load prospect data for remaining tabs
-    prospects = load_user_prospects(user_dir)
+    prospects = db.load_prospects(current_user)
 
     if not prospects:
-        for tab in tabs[1:]:
+        for tab in tabs[1:5]:
             with tab:
                 st.info("No prospect data yet. Go to **Manage Partners** to add partners and run a scan.")
         return
 
-    outreach = load_user_outreach(user_dir)
+    outreach = db.load_outreach(current_user)
 
     # Pipedrive enrichment
     has_pipedrive = pipedrive_available()
@@ -325,7 +253,7 @@ def main():
         )
     ]
 
-    # ── Summary metrics (above tabs) ──────────────────────────────────
+    # ── Summary metrics ───────────────────────────────────────────────
     if has_pipedrive:
         col1, col2, col3, col4, col5, col6 = st.columns(6)
     else:
@@ -348,18 +276,17 @@ def main():
     with tabs[3]:
         _render_overlap_matrix(filtered, selected_partners)
     with tabs[4]:
-        _render_outreach_tracker(filtered, outreach, has_pipedrive, user_dir)
+        _render_outreach_tracker(filtered, outreach, has_pipedrive, current_user)
 
 
 # ── Manage Partners ──────────────────────────────────────────────────
 
-def _render_manage_partners(user_dir: Path, username: str):
+def _render_manage_partners(user: str):
     st.subheader("Your Referral Partners")
     st.caption("Add Instagram accounts of partners who can make intros for you")
 
-    partners = load_user_partners(user_dir)
+    partners = db.load_partners(user)
 
-    # Current partner list
     if partners:
         st.markdown(f"**{len(partners)} partner(s) configured:**")
         for i, partner in enumerate(partners):
@@ -367,14 +294,13 @@ def _render_manage_partners(user_dir: Path, username: str):
             col1.markdown(f"[@{partner}](https://instagram.com/{partner})")
             if col2.button("Remove", key=f"remove_{i}_{partner}"):
                 partners.remove(partner)
-                save_user_partners(user_dir, partners)
+                db.save_partners(user, partners)
                 st.rerun()
     else:
         st.info("No partners added yet. Add Instagram accounts below.")
 
     st.divider()
 
-    # Add partner (using a form so text input + button submit together)
     st.markdown("#### Add Partner")
     with st.form("add_partner_form", clear_on_submit=True):
         new_partner = st.text_input(
@@ -387,7 +313,7 @@ def _render_manage_partners(user_dir: Path, username: str):
         clean = new_partner.strip().lstrip("@").split("?")[0].split("/")[-1].lower()
         if clean and clean not in partners:
             partners.append(clean)
-            save_user_partners(user_dir, partners)
+            db.save_partners(user, partners)
             st.success(f"Added @{clean}")
             st.rerun()
         elif clean in partners:
@@ -412,14 +338,14 @@ def _render_manage_partners(user_dir: Path, username: str):
     )
 
     if col_scan2.button("Run Scan", type="primary"):
-        _run_scan(user_dir, partners, skip_new)
+        _run_scan(user, partners, skip_new)
 
 
-def _run_scan(user_dir: Path, partners: list[str], skip_new: bool):
+def _run_scan(user: str, partners: list[str], skip_new: bool):
     """Run the prospect finder for this user's partners."""
     from whop_prospect_finder import find_prospects
 
-    keys = get_effective_api_keys(user_dir)
+    keys = get_effective_api_keys(user)
 
     missing = []
     if not keys.get("apify_api_token"):
@@ -434,15 +360,25 @@ def _run_scan(user_dir: Path, partners: list[str], skip_new: bool):
 
     exclude = set(partners) | {"aymon_holth", "nocode.alex"}
 
+    def on_save(prospects):
+        db.save_prospects(user, prospects)
+
+    def cache_load(partner):
+        return db.load_following_cache(user, partner)
+
+    def cache_save(partner, data):
+        db.save_following_cache(user, partner, data)
+
     with st.spinner(f"Scanning followings for {len(partners)} partner(s)... This may take a few minutes."):
         try:
             prospects = find_prospects(
                 partners=partners,
                 skip_new=skip_new,
-                output_dir=user_dir,
-                cache_dir=user_dir / "partner_followings",
                 exclude_usernames=exclude,
                 api_keys=keys,
+                save_callback=on_save,
+                cache_load_fn=cache_load,
+                cache_save_fn=cache_save,
             )
             if prospects:
                 st.success(f"Found {len(prospects)} prospects! Switch to the other tabs to view results.")
@@ -568,7 +504,7 @@ def _render_all_prospects(df: pd.DataFrame, has_pipedrive: bool):
     )
 
 
-def _render_outreach_tracker(df: pd.DataFrame, outreach: dict, has_pipedrive: bool, user_dir: Path):
+def _render_outreach_tracker(df: pd.DataFrame, outreach: dict, has_pipedrive: bool, user: str):
     st.subheader("Outreach Tracker")
     st.caption("Update outreach status for prospects directly from here")
 
@@ -604,13 +540,7 @@ def _render_outreach_tracker(df: pd.DataFrame, outreach: dict, has_pipedrive: bo
         )
 
         if st.button("Save", type="primary"):
-            key = selected_prospect.lower()
-            outreach[key] = {
-                "status": new_status,
-                "notes": notes,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
-            save_user_outreach(user_dir, outreach)
+            db.save_outreach_entry(user, selected_prospect.lower(), new_status, notes)
             st.success(f"Updated @{selected_prospect} → {new_status}")
             st.rerun()
 
@@ -734,11 +664,11 @@ def _render_overlap_matrix(df: pd.DataFrame, partners: list[str]):
 
 # ── Settings ─────────────────────────────────────────────────────────
 
-def _render_settings(user_dir: Path, username: str):
+def _render_settings(user: str):
     st.subheader("API Keys")
     st.caption("Enter your own API keys so scans use your accounts, not the shared ones.")
 
-    user_keys = load_user_api_keys(user_dir)
+    user_keys = db.load_api_keys(user)
 
     st.markdown("""
 **Where to get your keys:**
@@ -780,13 +710,12 @@ def _render_settings(user_dir: Path, username: str):
         if apify_token.strip():
             new_keys["apify_api_token"] = apify_token.strip()
 
-        save_user_api_keys(user_dir, new_keys)
+        db.save_api_keys(user, new_keys)
         st.success("API keys saved!")
 
-    # Show key status
     st.divider()
     st.markdown("#### Your Key Status")
-    effective = get_effective_api_keys(user_dir)
+    effective = get_effective_api_keys(user)
 
     for label, key_name in [
         ("RapidAPI", "rapidapi_key"),
