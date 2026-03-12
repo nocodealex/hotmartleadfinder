@@ -310,7 +310,8 @@ def _render_manage_partners(user: str):
         submitted = st.form_submit_button("Add Partner", type="primary")
 
     if submitted and new_partner:
-        clean = new_partner.strip().lstrip("@").split("?")[0].split("/")[-1].lower()
+        raw = new_partner.strip().lstrip("@").split("?")[0].rstrip("/")
+        clean = raw.split("/")[-1].lower().strip()
         if clean and clean not in partners:
             partners.append(clean)
             db.save_partners(user, partners)
