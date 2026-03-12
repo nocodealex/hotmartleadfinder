@@ -99,6 +99,7 @@ def find_prospects(
     output_dir: Path | None = None,
     cache_dir: Path | None = None,
     exclude_usernames: set[str] | None = None,
+    api_keys: dict | None = None,
 ):
     """
     Scan referral partners' followings for Whop prospects.
@@ -110,6 +111,7 @@ def find_prospects(
         output_dir: Directory for output CSV/JSON (default: data/)
         cache_dir: Directory for following list cache (default: data/partner_followings/)
         exclude_usernames: Usernames to exclude from results (default: EXCLUDE_USERNAMES)
+        api_keys: Optional dict with keys 'rapidapi_key', 'anthropic_api_key', 'apify_api_token'
     """
     min_score = min_score or config.LEAD_SCORE_THRESHOLD
     partners = partners or REFERRAL_PARTNERS
@@ -117,16 +119,17 @@ def find_prospects(
     output_json = (output_dir / "prospects.json") if output_dir else DEFAULT_OUTPUT_JSON
     cache_dir = cache_dir or DEFAULT_FOLLOWINGS_CACHE_DIR
     exclude = exclude_usernames if exclude_usernames is not None else EXCLUDE_USERNAMES
+    keys = api_keys or {}
 
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
 
     storage = Storage()
-    scraper = ApifyFollowingScraper()
+    scraper = ApifyFollowingScraper(api_token=keys.get("apify_api_token"))
 
     if not skip_new:
-        ig = InstagramClient()
-        analyzer = LeadAnalyzer()
+        ig = InstagramClient(api_key=keys.get("rapidapi_key"))
+        analyzer = LeadAnalyzer(api_key=keys.get("anthropic_api_key"))
 
     # Phase 1: Scrape followings for each partner
     console.print(f"\n[bold cyan]Phase 1: Scraping followings for {len(partners)} partners[/]\n")
