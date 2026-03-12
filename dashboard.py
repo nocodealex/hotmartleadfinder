@@ -105,6 +105,30 @@ def save_user_outreach(user_dir: Path, data: dict):
     )
 
 
+def load_user_api_keys(user_dir: Path) -> dict:
+    keys_file = user_dir / "api_keys.json"
+    if keys_file.exists():
+        try:
+            return json.loads(keys_file.read_text())
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {}
+
+
+def save_user_api_keys(user_dir: Path, keys: dict):
+    (user_dir / "api_keys.json").write_text(json.dumps(keys, indent=2))
+
+
+def get_effective_api_keys(user_dir: Path) -> dict:
+    """Return user's API keys, falling back to global config for any missing ones."""
+    user_keys = load_user_api_keys(user_dir)
+    return {
+        "rapidapi_key": user_keys.get("rapidapi_key") or config.RAPIDAPI_KEY,
+        "anthropic_api_key": user_keys.get("anthropic_api_key") or config.ANTHROPIC_API_KEY,
+        "apify_api_token": user_keys.get("apify_api_token") or config.APIFY_API_TOKEN,
+    }
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def format_followers(count) -> str:
@@ -189,10 +213,14 @@ def main():
         "All Prospects",
         "Overlap Matrix",
         "Outreach Tracker",
+        "Settings",
     ])
 
     with tabs[0]:
         _render_manage_partners(user_dir, current_user)
+
+    with tabs[5]:
+        _render_settings(user_dir, current_user)
 
     # Load prospect data for remaining tabs
     prospects = load_user_prospects(user_dir)
@@ -391,6 +419,19 @@ def _run_scan(user_dir: Path, partners: list[str], skip_new: bool):
     """Run the prospect finder for this user's partners."""
     from whop_prospect_finder import find_prospects
 
+    keys = get_effective_api_keys(user_dir)
+
+    missing = []
+    if not keys.get("apify_api_token"):
+        missing.append("Apify API Token")
+    if not keys.get("rapidapi_key"):
+        missing.append("RapidAPI Key")
+    if not skip_new and not keys.get("anthropic_api_key"):
+        missing.append("Anthropic API Key")
+    if missing:
+        st.error(f"Missing API keys: {', '.join(missing)}. Go to the **Settings** tab to add them.")
+        return
+
     exclude = set(partners) | {"aymon_holth", "nocode.alex"}
 
     with st.spinner(f"Scanning followings for {len(partners)} partner(s)... This may take a few minutes."):
@@ -401,6 +442,7 @@ def _run_scan(user_dir: Path, partners: list[str], skip_new: bool):
                 output_dir=user_dir,
                 cache_dir=user_dir / "partner_followings",
                 exclude_usernames=exclude,
+                api_keys=keys,
             )
             if prospects:
                 st.success(f"Found {len(prospects)} prospects! Switch to the other tabs to view results.")
@@ -688,6 +730,77 @@ def _render_overlap_matrix(df: pd.DataFrame, partners: list[str]):
         hide_index=True,
         height=min(len(display) * 38 + 40, 600),
     )
+
+
+# ── Settings ─────────────────────────────────────────────────────────
+
+def _render_settings(user_dir: Path, username: str):
+    st.subheader("API Keys")
+    st.caption("Enter your own API keys so scans use your accounts, not the shared ones.")
+
+    user_keys = load_user_api_keys(user_dir)
+
+    st.markdown("""
+**Where to get your keys:**
+1. **RapidAPI Key** — Sign up at [rapidapi.com](https://rapidapi.com), subscribe to the [Instagram API](https://rapidapi.com/social-starter-api-social-starter-api-default/api/instagram-api-fast-reliable-data-scraper) (free tier available), and copy your API key from the dashboard
+2. **Anthropic API Key** — Sign up at [console.anthropic.com](https://console.anthropic.com), add credits under Billing, then create an API key under API Keys
+3. **Apify API Token** — Sign up at [apify.com](https://apify.com) (free tier available), go to Settings > Integrations, and copy your API token
+    """)
+
+    st.divider()
+
+    with st.form("api_keys_form"):
+        rapidapi_key = st.text_input(
+            "RapidAPI Key",
+            value=user_keys.get("rapidapi_key", ""),
+            type="password",
+            help="Used to fetch Instagram profiles and posts",
+        )
+        anthropic_key = st.text_input(
+            "Anthropic API Key",
+            value=user_keys.get("anthropic_api_key", ""),
+            type="password",
+            help="Used for AI-powered lead qualification (only needed for full scans)",
+        )
+        apify_token = st.text_input(
+            "Apify API Token",
+            value=user_keys.get("apify_api_token", ""),
+            type="password",
+            help="Used to scrape partner following lists",
+        )
+
+        saved = st.form_submit_button("Save API Keys", type="primary")
+
+    if saved:
+        new_keys = {}
+        if rapidapi_key.strip():
+            new_keys["rapidapi_key"] = rapidapi_key.strip()
+        if anthropic_key.strip():
+            new_keys["anthropic_api_key"] = anthropic_key.strip()
+        if apify_token.strip():
+            new_keys["apify_api_token"] = apify_token.strip()
+
+        save_user_api_keys(user_dir, new_keys)
+        st.success("API keys saved!")
+
+    # Show key status
+    st.divider()
+    st.markdown("#### Your Key Status")
+    effective = get_effective_api_keys(user_dir)
+
+    for label, key_name in [
+        ("RapidAPI", "rapidapi_key"),
+        ("Anthropic", "anthropic_api_key"),
+        ("Apify", "apify_api_token"),
+    ]:
+        has_own = bool(user_keys.get(key_name))
+        has_any = bool(effective.get(key_name))
+        if has_own:
+            st.markdown(f"- **{label}:** Using your own key")
+        elif has_any:
+            st.markdown(f"- **{label}:** Using shared key (add your own to avoid using shared credits)")
+        else:
+            st.markdown(f"- **{label}:** Not configured")
 
 
 if __name__ == "__main__":
