@@ -31,6 +31,10 @@ RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN", "")
 
+# ── Supabase ─────────────────────────────────────────────────────────
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+
 # ── Pipedrive CRM ────────────────────────────────────────────────────
 PIPEDRIVE_API_TOKEN = os.getenv("PIPEDRIVE_API_TOKEN", "")
 PIPEDRIVE_DOMAIN = os.getenv("PIPEDRIVE_DOMAIN", "")  # e.g. "yourcompany" for yourcompany.pipedrive.com
