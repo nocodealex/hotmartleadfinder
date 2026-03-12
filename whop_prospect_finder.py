@@ -64,19 +64,32 @@ def scrape_partner_following(
     partner: str,
     scraper: ApifyFollowingScraper,
     cache_dir: Path | None = None,
+    cache_load_fn=None,
+    cache_save_fn=None,
 ) -> list[dict]:
     """
-    Fetch who a partner follows, with local caching.
-    Returns list of dicts with at least 'username' key.
-    """
-    cache_dir = cache_dir or DEFAULT_FOLLOWINGS_CACHE_DIR
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_dir / f"{partner}.json"
+    Fetch who a partner follows, with caching.
 
-    if cache_file.exists():
-        cached = json.loads(cache_file.read_text())
-        logger.info(f"[@{partner}] Loaded {len(cached)} followings from cache")
-        return cached
+    If cache_load_fn/cache_save_fn are provided (e.g. Supabase callbacks),
+    they are used instead of the local filesystem cache.
+    """
+    # Try loading from callback cache first (Supabase path)
+    if cache_load_fn is not None:
+        cached = cache_load_fn(partner)
+        if cached is not None:
+            logger.info(f"[@{partner}] Loaded {len(cached)} followings from DB cache")
+            return cached
+
+    # Fall back to file cache (CLI path)
+    if cache_load_fn is None:
+        cache_dir = cache_dir or DEFAULT_FOLLOWINGS_CACHE_DIR
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / f"{partner}.json"
+
+        if cache_file.exists():
+            cached = json.loads(cache_file.read_text())
+            logger.info(f"[@{partner}] Loaded {len(cached)} followings from file cache")
+            return cached
 
     logger.info(f"[@{partner}] Scraping following list via Apify...")
     try:
@@ -86,7 +99,16 @@ def scrape_partner_following(
         return []
 
     logger.info(f"[@{partner}] Got {len(following)} followings")
-    cache_file.write_text(json.dumps(following, default=str))
+
+    # Save to callback cache (Supabase) or file cache
+    if cache_save_fn is not None:
+        cache_save_fn(partner, following)
+    else:
+        cache_dir = cache_dir or DEFAULT_FOLLOWINGS_CACHE_DIR
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / f"{partner}.json"
+        cache_file.write_text(json.dumps(following, default=str))
+
     return following
 
 
@@ -100,6 +122,9 @@ def find_prospects(
     cache_dir: Path | None = None,
     exclude_usernames: set[str] | None = None,
     api_keys: dict | None = None,
+    save_callback=None,
+    cache_load_fn=None,
+    cache_save_fn=None,
 ):
     """
     Scan referral partners' followings for Whop prospects.
@@ -112,6 +137,9 @@ def find_prospects(
         cache_dir: Directory for following list cache (default: data/partner_followings/)
         exclude_usernames: Usernames to exclude from results (default: EXCLUDE_USERNAMES)
         api_keys: Optional dict with keys 'rapidapi_key', 'anthropic_api_key', 'apify_api_token'
+        save_callback: Optional function(prospects) called to save results (e.g. to Supabase)
+        cache_load_fn: Optional function(partner) -> list[dict] | None for loading following cache
+        cache_save_fn: Optional function(partner, data) for saving following cache
     """
     min_score = min_score or config.LEAD_SCORE_THRESHOLD
     partners = partners or REFERRAL_PARTNERS
@@ -139,7 +167,12 @@ def find_prospects(
 
     for partner in partners:
         console.print(f"  Fetching who @{partner} follows...")
-        following = scrape_partner_following(partner, scraper, cache_dir=cache_dir)
+        following = scrape_partner_following(
+            partner, scraper,
+            cache_dir=cache_dir,
+            cache_load_fn=cache_load_fn,
+            cache_save_fn=cache_save_fn,
+        )
 
         usernames = set()
         for item in following:
@@ -291,7 +324,11 @@ def find_prospects(
     prospects.sort(key=lambda x: (-x["num_partners_connected"], -x["overall_score"]))
 
     _print_results(prospects, partners)
-    _save_results(prospects, output_csv, output_json)
+
+    if save_callback is not None:
+        save_callback(prospects)
+    else:
+        _save_results(prospects, output_csv, output_json)
 
     # Stats
     console.print(f"\n[bold]Stats:[/]")
