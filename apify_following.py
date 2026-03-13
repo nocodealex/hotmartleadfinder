@@ -124,7 +124,7 @@ class ApifyFollowingScraper:
             raise ApifyFollowingError("No dataset ID in Apify run result")
 
         try:
-            items_url = self._api_url(f"/datasets/{dataset_id}/items") + "&format=json&clean=true"
+            items_url = self._api_url(f"/datasets/{dataset_id}/items") + "&format=json"
             resp = requests.get(items_url, timeout=120)
             resp.raise_for_status()
             raw = resp.json()
@@ -140,6 +140,32 @@ class ApifyFollowingScraper:
             items = []
 
         logger.info(f"[Apify] Got {len(items)} raw items for @{username}")
+
+        # If dataset is empty, try the key-value store (some actors store results there)
+        if not items:
+            kv_store_id = run_info.get("defaultKeyValueStoreId")
+            if kv_store_id:
+                logger.info(f"[Apify] Dataset empty, trying key-value store {kv_store_id}")
+                try:
+                    kv_url = self._api_url(f"/key-value-stores/{kv_store_id}/records/OUTPUT")
+                    kv_resp = requests.get(kv_url, timeout=60)
+                    if kv_resp.status_code == 200:
+                        kv_data = kv_resp.json()
+                        if isinstance(kv_data, list):
+                            items = kv_data
+                        elif isinstance(kv_data, dict):
+                            items = kv_data.get("items", kv_data.get("data", kv_data.get("following", [])))
+                        logger.info(f"[Apify] Got {len(items)} items from key-value store")
+                except Exception as e:
+                    logger.warning(f"[Apify] Key-value store fetch failed: {e}")
+
+        if not items:
+            raise ApifyFollowingError(
+                f"Apify actor succeeded but returned 0 items for @{username}. "
+                f"Dataset ID: {dataset_id}. "
+                f"The actor may have changed its output format."
+            )
+
         if items:
             sample = items[0]
             logger.info(f"[Apify] Sample item keys: {list(sample.keys())[:10]}")
