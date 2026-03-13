@@ -527,19 +527,37 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
         # Step 3: Run the full qualification pipeline
         status.update(label=f"Qualifying {total_accounts} accounts...", expanded=True)
 
-    try:
-        prospects = find_prospects(
-            partners=partners,
-            skip_new=skip_new,
-            exclude_usernames=exclude,
-            api_keys=keys,
-            save_callback=on_save,
-            cache_load_fn=cache_load,
-            cache_save_fn=cache_save,
-            existing_prospects=existing,
-            progress_save_fn=on_progress,
-            force_refresh=False,
+    st.info(
+        f"Analyzing {total_accounts} accounts across {len(partners)} partner(s). "
+        f"This may take 10-30 minutes. Do not close this tab."
+    )
+
+    progress_placeholder = st.empty()
+    prospects_found_count = [0]
+
+    def on_progress_with_ui(prospect):
+        db.upsert_prospect(user, prospect)
+        prospects_found_count[0] += 1
+        progress_placeholder.success(
+            f"Found prospect #{prospects_found_count[0]}: "
+            f"@{prospect.get('username', '?')} "
+            f"(score: {prospect.get('overall_score', 0):.2f})"
         )
+
+    try:
+        with st.spinner("Qualifying prospects — fetching profiles, running prefilter, analyzing with Claude..."):
+            prospects = find_prospects(
+                partners=partners,
+                skip_new=skip_new,
+                exclude_usernames=exclude,
+                api_keys=keys,
+                save_callback=on_save,
+                cache_load_fn=cache_load,
+                cache_save_fn=cache_save,
+                existing_prospects=existing,
+                progress_save_fn=on_progress_with_ui,
+                force_refresh=False,
+            )
 
         if prospects:
             total_value = sum(p.get("estimated_deal_value", 0) for p in prospects)
@@ -550,9 +568,10 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
             )
         else:
             st.warning(
-                "No prospects found. This usually means:\n"
-                "- All accounts were filtered out by the prefilter\n"
-                "- Try running with 'Skip new analysis' unchecked"
+                "No prospects found. This can mean:\n"
+                "- All accounts were filtered out (not in digital marketing niche)\n"
+                "- Make sure 'Skip new analysis' is **unchecked** for a full scan\n"
+                "- The RapidAPI key may be invalid (check Settings tab)"
             )
     except Exception as e:
         st.error(f"Scan failed: {e}\n\nCheck that your API keys are valid in the Settings tab.")
