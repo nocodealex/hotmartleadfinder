@@ -440,6 +440,9 @@ def _run_scan(user: str, partners: list[str], skip_new: bool):
     def on_save(prospects):
         db.save_prospects(user, prospects)
 
+    def on_progress(prospect):
+        db.upsert_prospect(user, prospect)
+
     def cache_load(partner):
         return db.load_following_cache(user, partner)
 
@@ -457,6 +460,7 @@ def _run_scan(user: str, partners: list[str], skip_new: bool):
                 cache_load_fn=cache_load,
                 cache_save_fn=cache_save,
                 existing_prospects=existing,
+                progress_save_fn=on_progress,
             )
             if prospects:
                 total_value = sum(p.get("estimated_deal_value", 0) for p in prospects)
