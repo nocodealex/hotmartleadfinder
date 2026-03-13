@@ -36,7 +36,17 @@ NICHE_LABELS = {
     "unknown": "Unknown",
 }
 
+SIZE_LABELS = {
+    "whale": "Whale ($1M+)",
+    "large": "Large ($200K-$1M)",
+    "medium": "Medium ($50K-$200K)",
+    "small": "Small ($10K-$50K)",
+    "micro": "Micro (<$10K)",
+    "unknown": "Unknown",
+}
+
 TIER_ORDER = ["tier1_whale", "tier2_agency", "tier3_affiliate", "tier4_seller", "untiered"]
+SIZE_ORDER = ["whale", "large", "medium", "small", "micro", "unknown"]
 
 OUTREACH_STATUSES = [
     "Not Contacted",
@@ -68,6 +78,26 @@ def format_followers(count) -> str:
     if count >= 1_000:
         return f"{count / 1_000:.1f}K"
     return str(int(count))
+
+
+def format_deal_value(value) -> str:
+    if not value or value <= 0:
+        return "-"
+    if value >= 1_000:
+        return f"${value / 1_000:.1f}K"
+    return f"${value:,.0f}"
+
+
+def format_revenue_range(low, high) -> str:
+    if not low and not high:
+        return "-"
+    def _fmt(v):
+        if v >= 1_000_000:
+            return f"${v / 1_000_000:.1f}M"
+        if v >= 1_000:
+            return f"${v / 1_000:.0f}K"
+        return f"${v:.0f}"
+    return f"{_fmt(low)}-{_fmt(high)}/yr"
 
 
 def pipedrive_available() -> bool:
@@ -137,8 +167,9 @@ def main():
     # ── Tabs ─────────────────────────────────────────────────────────
     tabs = st.tabs([
         "Manage Partners",
-        "Grouped by Partner",
+        "Partner Briefs",
         "All Prospects",
+        "Grouped by Partner",
         "Overlap Matrix",
         "Outreach Tracker",
         "Settings",
@@ -147,14 +178,14 @@ def main():
     with tabs[0]:
         _render_manage_partners(current_user)
 
-    with tabs[5]:
+    with tabs[6]:
         _render_settings(current_user)
 
     # Load prospect data for remaining tabs
     prospects = db.load_prospects(current_user)
 
     if not prospects:
-        for tab in tabs[1:5]:
+        for tab in tabs[1:6]:
             with tab:
                 st.info("No prospect data yet. Go to **Manage Partners** to add partners and run a scan.")
         return
@@ -182,15 +213,51 @@ def main():
 
     df = pd.DataFrame(prospects)
 
+    # Ensure numeric columns exist with defaults
+    for col, default in [
+        ("estimated_deal_value", 0), ("engagement_rate", 0),
+        ("avg_likes", 0), ("avg_comments", 0),
+        ("estimated_annual_revenue_low", 0), ("estimated_annual_revenue_high", 0),
+    ]:
+        if col not in df.columns:
+            df[col] = default
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default)
+
+    for col, default in [
+        ("business_size_tier", "unknown"), ("revenue_confidence", "none"),
+    ]:
+        if col not in df.columns:
+            df[col] = default
+        df[col] = df[col].fillna(default)
+
+    if "crm_tag" not in df.columns:
+        df["crm_tag"] = "new"
+
     all_partners = sorted(set(
-        p for row in prospects for p in row["followed_by_partners"]
+        p for row in prospects for p in row.get("followed_by_partners", [])
     ))
+
+    # ── Revenue Impact Summary (top of page) ─────────────────────────
+    total_pipeline = df["estimated_deal_value"].sum()
+    col_rev1, col_rev2, col_rev3, col_rev4, col_rev5, col_rev6 = st.columns(6)
+    col_rev1.metric("Total Prospects", len(df))
+    col_rev2.metric("Pipeline Value", format_deal_value(total_pipeline))
+    col_rev3.metric("Whales", len(df[df["business_size_tier"] == "whale"]))
+    col_rev4.metric("Large", len(df[df["business_size_tier"] == "large"]))
+    col_rev5.metric("Not Contacted", len(df[df["outreach_status"] == "Not Contacted"]))
+
+    if has_pipedrive:
+        active_deals = len(df[df.get("crm_tag", pd.Series(dtype=str)) == "active_deal"]) if "crm_tag" in df.columns else 0
+        col_rev6.metric("Active in CRM", active_deals)
+    else:
+        avg_score = df["overall_score"].mean()
+        col_rev6.metric("Avg Score", f"{avg_score:.2f}" if len(df) else "-")
 
     # ── Sidebar filters ──────────────────────────────────────────────
     st.sidebar.divider()
     st.sidebar.header("Filters")
 
-    min_score = st.sidebar.slider("Minimum score", 0.0, 1.0, 0.55, 0.05)
+    min_score = st.sidebar.slider("Minimum score", 0.0, 1.0, 0.40, 0.05)
 
     selected_tiers = st.sidebar.multiselect(
         "Tiers",
@@ -199,7 +266,14 @@ def main():
         format_func=lambda t: TIER_LABELS.get(t, t),
     )
 
-    all_niches = sorted(df["niche"].unique())
+    selected_sizes = st.sidebar.multiselect(
+        "Business Size",
+        options=SIZE_ORDER,
+        default=SIZE_ORDER,
+        format_func=lambda s: SIZE_LABELS.get(s, s),
+    )
+
+    all_niches = sorted(df["niche"].dropna().unique())
     selected_niches = st.sidebar.multiselect(
         "Niches",
         options=all_niches,
@@ -208,7 +282,7 @@ def main():
     )
 
     min_partners = st.sidebar.slider(
-        "Min partner connections", 1, int(df["num_partners_connected"].max()), 1,
+        "Min partner connections", 1, max(1, int(df["num_partners_connected"].max())), 1,
     )
 
     selected_partners = st.sidebar.multiselect(
@@ -220,12 +294,21 @@ def main():
 
     if has_pipedrive:
         st.sidebar.divider()
-        st.sidebar.header("CRM Status")
-        crm_options = sorted(df["crm_status"].unique())
-        selected_crm = st.sidebar.multiselect(
-            "CRM status", options=crm_options, default=crm_options,
+        st.sidebar.header("CRM Filter")
+        hide_active = st.sidebar.checkbox(
+            "Hide prospects with active CRM deals",
+            value=True,
+            help="Excludes prospects already being worked in Pipedrive",
         )
+        if "crm_status" in df.columns:
+            crm_options = sorted(df["crm_status"].dropna().unique())
+            selected_crm = st.sidebar.multiselect(
+                "CRM status", options=crm_options, default=crm_options,
+            )
+        else:
+            selected_crm = None
     else:
+        hide_active = False
         selected_crm = None
 
     st.sidebar.divider()
@@ -239,43 +322,34 @@ def main():
     filtered = df[
         (df["overall_score"] >= min_score)
         & (df["tier"].isin(selected_tiers))
+        & (df["business_size_tier"].isin(selected_sizes))
         & (df["niche"].isin(selected_niches))
         & (df["num_partners_connected"] >= min_partners)
         & (df["outreach_status"].isin(selected_outreach))
     ].copy()
 
-    if selected_crm is not None:
+    if selected_crm is not None and "crm_status" in filtered.columns:
         filtered = filtered[filtered["crm_status"].isin(selected_crm)]
+
+    if hide_active and "crm_tag" in filtered.columns:
+        filtered = filtered[filtered["crm_tag"] != "active_deal"]
 
     filtered = filtered[
         filtered["followed_by_partners"].apply(
-            lambda partners: any(p in selected_partners for p in partners)
+            lambda partners: any(p in selected_partners for p in partners) if isinstance(partners, list) else False
         )
     ]
 
-    # ── Summary metrics ───────────────────────────────────────────────
-    if has_pipedrive:
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
-    else:
-        col1, col2, col3, col4, col5 = st.columns(5)
-        col6 = None
-
-    col1.metric("Total Prospects", len(filtered))
-    col2.metric("Whales", len(filtered[filtered["tier"] == "tier1_whale"]))
-    col3.metric("Agencies", len(filtered[filtered["tier"] == "tier2_agency"]))
-    col4.metric("Avg Score", f"{filtered['overall_score'].mean():.2f}" if len(filtered) else "-")
-    col5.metric("Not Contacted", len(filtered[filtered["outreach_status"] == "Not Contacted"]))
-    if col6 is not None:
-        col6.metric("In CRM", len(filtered[filtered["crm_status"] != "Not in CRM"]))
-
     # ── Render tabs ───────────────────────────────────────────────────
     with tabs[1]:
-        _render_partner_view(filtered, selected_partners, has_pipedrive)
+        _render_partner_briefs(filtered, all_partners, has_pipedrive)
     with tabs[2]:
         _render_all_prospects(filtered, has_pipedrive)
     with tabs[3]:
-        _render_overlap_matrix(filtered, selected_partners)
+        _render_partner_view(filtered, selected_partners, has_pipedrive)
     with tabs[4]:
+        _render_overlap_matrix(filtered, selected_partners)
+    with tabs[5]:
         _render_outreach_tracker(filtered, outreach, has_pipedrive, current_user)
 
 
@@ -382,11 +456,115 @@ def _run_scan(user: str, partners: list[str], skip_new: bool):
                 cache_save_fn=cache_save,
             )
             if prospects:
-                st.success(f"Found {len(prospects)} prospects! Switch to the other tabs to view results.")
+                total_value = sum(p.get("estimated_deal_value", 0) for p in prospects)
+                st.success(
+                    f"Found {len(prospects)} prospects! "
+                    f"Estimated pipeline value: {format_deal_value(total_value)}. "
+                    f"Switch to the other tabs to view results."
+                )
             else:
                 st.warning("No prospects found. Try adding more partners or running without 'skip new analysis'.")
         except Exception as e:
             st.error(f"Scan failed: {e}")
+
+
+# ── Partner Briefs ───────────────────────────────────────────────────
+
+def _render_partner_briefs(df: pd.DataFrame, partners: list[str], has_pipedrive: bool):
+    st.subheader("Partner Intro Briefs")
+    st.caption(
+        "Top prospects per partner, ranked by estimated deal value. "
+        "Copy the brief and send it to your partner via WhatsApp or DM."
+    )
+
+    if df.empty:
+        st.info("No prospects match your filters.")
+        return
+
+    # Partner leaderboard
+    st.markdown("#### Partner Leaderboard")
+    leaderboard_data = []
+    for partner in partners:
+        partner_df = df[
+            df["followed_by_partners"].apply(
+                lambda ps: partner in ps if isinstance(ps, list) else False
+            )
+        ]
+        if partner_df.empty:
+            continue
+        total_value = partner_df["estimated_deal_value"].sum()
+        whale_count = len(partner_df[partner_df["business_size_tier"] == "whale"])
+        large_count = len(partner_df[partner_df["business_size_tier"] == "large"])
+        leaderboard_data.append({
+            "Partner": f"@{partner}",
+            "Prospects": len(partner_df),
+            "Pipeline Value": format_deal_value(total_value),
+            "Whales": whale_count,
+            "Large": large_count,
+            "_sort_value": total_value,
+        })
+
+    if leaderboard_data:
+        leaderboard_data.sort(key=lambda x: -x["_sort_value"])
+        lb_df = pd.DataFrame(leaderboard_data).drop(columns=["_sort_value"])
+        st.dataframe(lb_df, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # Per-partner briefs
+    st.markdown("#### Ready-to-Send Briefs")
+
+    for partner in partners:
+        partner_df = df[
+            df["followed_by_partners"].apply(
+                lambda ps: partner in ps if isinstance(ps, list) else False
+            )
+        ].sort_values("estimated_deal_value", ascending=False)
+
+        if partner_df.empty:
+            continue
+
+        top5 = partner_df.head(5)
+        total_value = partner_df["estimated_deal_value"].sum()
+
+        with st.expander(
+            f"@{partner} — {len(partner_df)} prospects ({format_deal_value(total_value)} value)",
+            expanded=False,
+        ):
+            # Display top prospects
+            display = top5[["username", "full_name", "overall_score", "business_size_tier",
+                            "estimated_deal_value", "niche", "lead_type", "follower_count"]].copy()
+            display["username"] = display["username"].apply(lambda u: f"@{u}")
+            display["overall_score"] = display["overall_score"].apply(lambda s: f"{s:.2f}")
+            display["business_size_tier"] = display["business_size_tier"].map(SIZE_LABELS).fillna("?")
+            display["estimated_deal_value"] = display["estimated_deal_value"].apply(format_deal_value)
+            display["niche"] = display["niche"].map(NICHE_LABELS).fillna("?")
+            display["follower_count"] = display["follower_count"].apply(format_followers)
+
+            display = display.rename(columns={
+                "username": "Prospect",
+                "full_name": "Name",
+                "overall_score": "Score",
+                "business_size_tier": "Business Size",
+                "estimated_deal_value": "Deal Value",
+                "niche": "Niche",
+                "lead_type": "Type",
+                "follower_count": "Followers",
+            })
+
+            st.dataframe(display, use_container_width=True, hide_index=True)
+
+            # Generate copyable brief
+            from whop_prospect_finder import generate_partner_brief
+            brief = generate_partner_brief(partner, df.to_dict("records"))
+
+            if brief:
+                st.text_area(
+                    "Copy this message:",
+                    value=brief,
+                    height=200,
+                    key=f"brief_{partner}",
+                )
 
 
 # ── Views ────────────────────────────────────────────────────────────
@@ -400,7 +578,9 @@ def _crm_columns(has_pipedrive: bool) -> list[str]:
 def _prepare_display(df_slice: pd.DataFrame, has_pipedrive: bool) -> pd.DataFrame:
     cols = [
         "username", "full_name", "overall_score", "tier",
-        "niche", "follower_count", "lead_type", "num_partners_connected",
+        "business_size_tier", "estimated_deal_value",
+        "niche", "follower_count", "engagement_rate",
+        "lead_type", "num_partners_connected",
         "outreach_status", "bio",
     ]
     if has_pipedrive:
@@ -410,21 +590,30 @@ def _prepare_display(df_slice: pd.DataFrame, has_pipedrive: bool) -> pd.DataFram
     display = df_slice[available_cols].copy()
 
     display["tier"] = display["tier"].map(TIER_LABELS).fillna("?")
+    display["business_size_tier"] = display["business_size_tier"].map(SIZE_LABELS).fillna("?")
     display["niche"] = display["niche"].map(NICHE_LABELS).fillna("?")
     display["followers"] = display["follower_count"].apply(format_followers)
     display["score"] = display["overall_score"].apply(lambda s: f"{s:.2f}")
+    display["deal_value"] = display["estimated_deal_value"].apply(format_deal_value)
     display["username"] = display["username"].apply(lambda u: f"@{u}")
     display["bio"] = display["bio"].apply(
         lambda b: (b[:80] + "...") if isinstance(b, str) and len(b) > 80 else b
     )
+    if "engagement_rate" in display.columns:
+        display["eng_rate"] = display["engagement_rate"].apply(
+            lambda r: f"{r:.1%}" if r and r > 0 else "-"
+        )
 
     rename_map = {
         "username": "Prospect",
         "full_name": "Name",
         "score": "Score",
         "tier": "Tier",
+        "business_size_tier": "Biz Size",
+        "deal_value": "Deal Value",
         "niche": "Niche",
         "followers": "Followers",
+        "eng_rate": "Eng Rate",
         "lead_type": "Type",
         "num_partners_connected": "# Partners",
         "outreach_status": "Outreach",
@@ -441,24 +630,29 @@ def _prepare_display(df_slice: pd.DataFrame, has_pipedrive: bool) -> pd.DataFram
 def _render_partner_view(df: pd.DataFrame, partners: list[str], has_pipedrive: bool):
     for partner in partners:
         partner_prospects = df[
-            df["followed_by_partners"].apply(lambda ps: partner in ps)
-        ].sort_values("overall_score", ascending=False)
+            df["followed_by_partners"].apply(
+                lambda ps: partner in ps if isinstance(ps, list) else False
+            )
+        ].sort_values("estimated_deal_value", ascending=False)
 
         if partner_prospects.empty:
             continue
 
+        total_value = partner_prospects["estimated_deal_value"].sum()
+
         with st.expander(
-            f"@{partner} — {len(partner_prospects)} intros available",
+            f"@{partner} — {len(partner_prospects)} intros ({format_deal_value(total_value)} value)",
             expanded=True,
         ):
             display = _prepare_display(partner_prospects, has_pipedrive)
             display["Also Followed By"] = partner_prospects["followed_by_partners"].apply(
                 lambda ps: ", ".join(f"@{p}" for p in ps if p != partner) or "-"
+                if isinstance(ps, list) else "-"
             )
 
             show_cols = [
-                "Prospect", "Name", "Score", "Tier", "Niche",
-                "Followers", "Type", "Outreach",
+                "Prospect", "Name", "Score", "Biz Size", "Deal Value",
+                "Tier", "Niche", "Followers", "Eng Rate", "Type", "Outreach",
             ] + _crm_columns(has_pipedrive) + [
                 "# Partners", "Also Followed By", "Bio",
             ]
@@ -475,12 +669,20 @@ def _render_partner_view(df: pd.DataFrame, partners: list[str], has_pipedrive: b
 def _render_all_prospects(df: pd.DataFrame, has_pipedrive: bool):
     sort_col = st.selectbox(
         "Sort by",
-        ["Score (high to low)", "Followers (high to low)", "Partner connections (high to low)"],
+        [
+            "Deal Value (high to low)",
+            "Score (high to low)",
+            "Followers (high to low)",
+            "Engagement Rate (high to low)",
+            "Partner connections (high to low)",
+        ],
     )
 
     sort_map = {
+        "Deal Value (high to low)": ("estimated_deal_value", False),
         "Score (high to low)": ("overall_score", False),
         "Followers (high to low)": ("follower_count", False),
+        "Engagement Rate (high to low)": ("engagement_rate", False),
         "Partner connections (high to low)": ("num_partners_connected", False),
     }
     col, asc = sort_map[sort_col]
@@ -490,8 +692,8 @@ def _render_all_prospects(df: pd.DataFrame, has_pipedrive: bool):
     display["Intro Via"] = sorted_df["partner_list"]
 
     show_cols = [
-        "Prospect", "Name", "Score", "Tier", "Niche",
-        "Followers", "Type", "Outreach",
+        "Prospect", "Name", "Score", "Biz Size", "Deal Value",
+        "Tier", "Niche", "Followers", "Eng Rate", "Type", "Outreach",
     ] + _crm_columns(has_pipedrive) + [
         "# Partners", "Intro Via", "Bio",
     ]
@@ -542,7 +744,7 @@ def _render_outreach_tracker(df: pd.DataFrame, outreach: dict, has_pipedrive: bo
 
         if st.button("Save", type="primary"):
             db.save_outreach_entry(user, selected_prospect.lower(), new_status, notes)
-            st.success(f"Updated @{selected_prospect} → {new_status}")
+            st.success(f"Updated @{selected_prospect} -> {new_status}")
             st.rerun()
 
     with col_right:
@@ -556,8 +758,14 @@ def _render_outreach_tracker(df: pd.DataFrame, outreach: dict, has_pipedrive: bo
                     st.markdown(f"**Name:** {p.get('full_name', '-')}")
                     st.markdown(f"**Score:** {p.get('overall_score', 0):.2f}")
                     st.markdown(f"**Tier:** {TIER_LABELS.get(p.get('tier', ''), '?')}")
+                    st.markdown(f"**Business Size:** {SIZE_LABELS.get(p.get('business_size_tier', ''), '?')}")
+                    deal_val = p.get("estimated_deal_value", 0)
+                    st.markdown(f"**Est. Deal Value:** {format_deal_value(deal_val)}")
                     st.markdown(f"**Niche:** {NICHE_LABELS.get(p.get('niche', ''), '?')}")
                     st.markdown(f"**Followers:** {format_followers(p.get('follower_count', 0))}")
+                    eng = p.get("engagement_rate", 0)
+                    if eng and eng > 0:
+                        st.markdown(f"**Engagement Rate:** {eng:.1%}")
                 with detail_col2:
                     st.markdown(f"**Outreach:** {p.get('outreach_status', 'Not Contacted')}")
                     if has_pipedrive:
@@ -566,6 +774,10 @@ def _render_outreach_tracker(df: pd.DataFrame, outreach: dict, has_pipedrive: bo
                             st.markdown(f"**Deal Stage:** {p.get('crm_deal_stage', '-')}")
                             st.markdown(f"**Pipeline:** {p.get('crm_pipeline', '-')}")
                     st.markdown(f"**Intro via:** {p.get('partner_list', '')}")
+                    rev_low = p.get("estimated_annual_revenue_low", 0)
+                    rev_high = p.get("estimated_annual_revenue_high", 0)
+                    if rev_low or rev_high:
+                        st.markdown(f"**Est. Revenue:** {format_revenue_range(rev_low, rev_high)}")
                     ig_url = p.get("instagram_url", "")
                     if ig_url:
                         st.markdown(f"[Instagram Profile]({ig_url})")
@@ -581,7 +793,8 @@ def _render_outreach_tracker(df: pd.DataFrame, outreach: dict, has_pipedrive: bo
     display["Intro Via"] = df.sort_values("outreach_status")["partner_list"]
 
     show_cols = [
-        "Prospect", "Name", "Score", "Tier", "Outreach",
+        "Prospect", "Name", "Score", "Biz Size", "Deal Value",
+        "Tier", "Outreach",
     ] + _crm_columns(has_pipedrive) + [
         "Followers", "Intro Via",
     ]
@@ -603,11 +816,15 @@ def _render_overlap_matrix(df: pd.DataFrame, partners: list[str]):
     for p1 in partners:
         matrix[p1] = {}
         p1_prospects = set(
-            df[df["followed_by_partners"].apply(lambda ps: p1 in ps)]["username"]
+            df[df["followed_by_partners"].apply(
+                lambda ps: p1 in ps if isinstance(ps, list) else False
+            )]["username"]
         )
         for p2 in partners:
             p2_prospects = set(
-                df[df["followed_by_partners"].apply(lambda ps: p2 in ps)]["username"]
+                df[df["followed_by_partners"].apply(
+                    lambda ps: p2 in ps if isinstance(ps, list) else False
+                )]["username"]
             )
             matrix[p1][p2] = len(p1_prospects & p2_prospects)
 
@@ -625,7 +842,7 @@ def _render_overlap_matrix(df: pd.DataFrame, partners: list[str]):
     st.caption("Prospects followed by 2+ of your partners — warmest intro opportunities")
 
     multi = df[df["num_partners_connected"] >= 2].sort_values(
-        ["num_partners_connected", "overall_score"], ascending=[False, False]
+        ["estimated_deal_value", "overall_score"], ascending=[False, False]
     )
 
     if multi.empty:
@@ -634,12 +851,15 @@ def _render_overlap_matrix(df: pd.DataFrame, partners: list[str]):
 
     display = multi[[
         "username", "full_name", "overall_score", "tier",
+        "business_size_tier", "estimated_deal_value",
         "follower_count", "num_partners_connected", "partner_list",
     ]].copy()
 
     display["tier"] = display["tier"].map(TIER_LABELS).fillna("?")
+    display["business_size_tier"] = display["business_size_tier"].map(SIZE_LABELS).fillna("?")
     display["followers"] = display["follower_count"].apply(format_followers)
     display["score"] = display["overall_score"].apply(lambda s: f"{s:.2f}")
+    display["deal_value"] = display["estimated_deal_value"].apply(format_deal_value)
     display["username"] = display["username"].apply(lambda u: f"@{u}")
 
     display = display.rename(columns={
@@ -647,6 +867,8 @@ def _render_overlap_matrix(df: pd.DataFrame, partners: list[str]):
         "full_name": "Name",
         "score": "Score",
         "tier": "Tier",
+        "business_size_tier": "Biz Size",
+        "deal_value": "Deal Value",
         "followers": "Followers",
         "num_partners_connected": "# Partners",
         "partner_list": "Followed By",
@@ -654,8 +876,8 @@ def _render_overlap_matrix(df: pd.DataFrame, partners: list[str]):
 
     st.dataframe(
         display[[
-            "Prospect", "Name", "Score", "Tier", "Followers",
-            "# Partners", "Followed By",
+            "Prospect", "Name", "Score", "Biz Size", "Deal Value",
+            "Tier", "Followers", "# Partners", "Followed By",
         ]],
         use_container_width=True,
         hide_index=True,
