@@ -90,6 +90,16 @@ PROSPECT_COLUMNS = [
     "username", "full_name", "bio", "follower_count", "overall_score",
     "tier", "classification", "niche", "lead_type", "instagram_url",
     "followed_by_partners", "num_partners_connected", "partner_list",
+    # Engagement metrics
+    "avg_likes", "avg_comments", "engagement_rate", "posting_frequency",
+    # Business account info
+    "is_business_account", "ig_category",
+    # Revenue estimation
+    "business_size_tier", "estimated_annual_revenue_low",
+    "estimated_annual_revenue_high", "estimated_deal_value",
+    "revenue_confidence", "revenue_signals",
+    # CRM cache
+    "crm_status", "crm_deal_stage",
 ]
 
 
