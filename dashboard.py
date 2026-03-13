@@ -484,18 +484,13 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
         for i, partner in enumerate(partners):
             st.write(f"Fetching @{partner} followings ({i+1}/{len(partners)})...")
             try:
-                from whop_prospect_finder import scrape_partner_following
-                following = scrape_partner_following(
-                    partner, scraper,
-                    cache_load_fn=cache_load,
-                    cache_save_fn=cache_save,
-                    force_refresh=force_refresh,
-                )
+                following = scraper.get_following(partner, limit=0)
                 count = len(following)
                 total_accounts += count
                 all_followings[partner] = following
                 if count > 0:
                     st.write(f"  @{partner}: {count} followings found")
+                    cache_save(partner, following)
                 else:
                     st.warning(f"  @{partner}: 0 followings returned (account may be private)")
             except Exception as e:
