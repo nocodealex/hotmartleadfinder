@@ -73,14 +73,12 @@ def scrape_partner_following(
     If cache_load_fn/cache_save_fn are provided (e.g. Supabase callbacks),
     they are used instead of the local filesystem cache.
     """
-    # Try loading from callback cache first (Supabase path)
     if cache_load_fn is not None:
         cached = cache_load_fn(partner)
         if cached is not None:
             logger.info(f"[@{partner}] Loaded {len(cached)} followings from DB cache")
             return cached
 
-    # Fall back to file cache (CLI path)
     if cache_load_fn is None:
         cache_dir = cache_dir or DEFAULT_FOLLOWINGS_CACHE_DIR
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -100,7 +98,6 @@ def scrape_partner_following(
 
     logger.info(f"[@{partner}] Got {len(following)} followings")
 
-    # Save to callback cache (Supabase) or file cache
     if cache_save_fn is not None:
         cache_save_fn(partner, following)
     else:
@@ -110,6 +107,50 @@ def scrape_partner_following(
         cache_file.write_text(json.dumps(following, default=str))
 
     return following
+
+
+# ── Engagement metrics ───────────────────────────────────────────────────
+
+def compute_engagement_metrics(posts, follower_count: int) -> dict:
+    """Compute engagement analytics from a list of PostData objects."""
+    if not posts:
+        return {
+            "avg_likes": 0.0,
+            "avg_comments": 0.0,
+            "engagement_rate": 0.0,
+            "posting_frequency": 0.0,
+        }
+
+    total_likes = sum(p.like_count for p in posts)
+    total_comments = sum(p.comment_count for p in posts)
+    n = len(posts)
+
+    avg_likes = total_likes / n
+    avg_comments = total_comments / n
+    avg_engagement = avg_likes + avg_comments
+    engagement_rate = avg_engagement / follower_count if follower_count > 0 else 0.0
+
+    timestamps = []
+    for p in posts:
+        ts = p.timestamp
+        if isinstance(ts, (int, float)) and ts > 0:
+            timestamps.append(ts)
+        elif isinstance(ts, str) and ts.isdigit():
+            timestamps.append(int(ts))
+
+    posting_frequency = 0.0
+    if len(timestamps) >= 2:
+        timestamps.sort()
+        span_days = (timestamps[-1] - timestamps[0]) / 86400
+        if span_days > 0:
+            posting_frequency = (len(timestamps) - 1) / (span_days / 7)
+
+    return {
+        "avg_likes": round(avg_likes, 1),
+        "avg_comments": round(avg_comments, 1),
+        "engagement_rate": round(engagement_rate, 4),
+        "posting_frequency": round(posting_frequency, 1),
+    }
 
 
 # ── Main logic ───────────────────────────────────────────────────────────
@@ -163,7 +204,7 @@ def find_prospects(
     console.print(f"\n[bold cyan]Phase 1: Scraping followings for {len(partners)} partners[/]\n")
 
     partner_followings: dict[str, set[str]] = {}
-    all_followed_usernames: dict[str, list[str]] = {}  # username -> [partners who follow them]
+    all_followed_usernames: dict[str, list[str]] = {}
 
     for partner in partners:
         console.print(f"  Fetching who @{partner} follows...")
@@ -203,7 +244,7 @@ def find_prospects(
 
     accounts_to_process = sorted(
         all_followed_usernames.items(),
-        key=lambda x: -len(x[1]),  # prioritize accounts followed by more partners
+        key=lambda x: -len(x[1]),
     )
 
     with Progress(
@@ -218,7 +259,6 @@ def find_prospects(
         for username, followed_by_partners in accounts_to_process:
             progress.update(task, description=f"@{username} (x{len(followed_by_partners)})")
 
-            # Check if already a known lead
             if username in existing_lead_map:
                 lead_data = existing_lead_map[username]
                 if lead_data.get("overall_score", 0) >= min_score:
@@ -231,12 +271,10 @@ def find_prospects(
                 progress.advance(task)
                 continue
 
-            # Skip known Whop sellers
             if storage.is_whop_seller(username):
                 progress.advance(task)
                 continue
 
-            # Fetch profile and analyze
             try:
                 profile = ig.get_profile(username)
                 if not profile:
@@ -248,19 +286,19 @@ def find_prospects(
                     progress.advance(task)
                     continue
 
-                # Prefilter
                 pf_result = prefilter_bio(username, profile.bio, profile.follower_count)
                 if pf_result == "skip":
                     skipped_prefilter += 1
                     progress.advance(task)
                     continue
 
-                # Bio analysis
                 bio_result = analyzer.analyze_bio(profile)
 
                 website_result = None
                 caption_result = None
                 event_result = None
+                posts = []
+                engagement = {"avg_likes": 0, "avg_comments": 0, "engagement_rate": 0, "posting_frequency": 0}
 
                 if bio_result.score >= config.BIO_SCORE_THRESHOLD:
                     if profile.bio_link:
@@ -269,6 +307,7 @@ def find_prospects(
                     try:
                         posts = ig.get_posts(profile.user_id)
                         if posts:
+                            engagement = compute_engagement_metrics(posts, profile.follower_count)
                             caption_result = analyzer.analyze_captions(posts, profile)
                             event_result = analyzer.analyze_post_images(posts, profile)
                     except InstagramAPIError:
@@ -282,6 +321,9 @@ def find_prospects(
                     event_result=event_result,
                     appearance_count=appearance_count,
                     follower_count=profile.follower_count,
+                    engagement_rate=engagement["engagement_rate"],
+                    avg_likes=engagement["avg_likes"],
+                    avg_comments=engagement["avg_comments"],
                 )
 
                 new_analyzed += 1
@@ -301,9 +343,14 @@ def find_prospects(
                     if analysis.overall_score >= min_score:
                         lead_data = storage.get_lead(username)
                         if lead_data:
-                            prospects.append(
-                                _build_prospect_entry(lead_data, followed_by_partners)
+                            revenue_data = getattr(analysis, "_revenue", {})
+                            prospect_entry = _build_prospect_entry(
+                                lead_data, followed_by_partners,
+                                engagement=engagement,
+                                revenue=revenue_data,
+                                profile=profile,
                             )
+                            prospects.append(prospect_entry)
 
             except CreditExhaustedError:
                 console.print(
@@ -321,7 +368,7 @@ def find_prospects(
     # Phase 3: Build per-partner report
     console.print(f"\n[bold cyan]Phase 3: Building intro report[/]\n")
 
-    prospects.sort(key=lambda x: (-x["num_partners_connected"], -x["overall_score"]))
+    prospects.sort(key=lambda x: (-x.get("estimated_deal_value", 0), -x["overall_score"]))
 
     _print_results(prospects, partners)
 
@@ -339,12 +386,25 @@ def find_prospects(
         console.print(f"  Skipped (private):           {skipped_private}")
     console.print(f"  Total prospects found:       {len(prospects)}")
 
+    total_pipeline = sum(p.get("estimated_deal_value", 0) for p in prospects)
+    if total_pipeline > 0:
+        console.print(f"  [bold green]Estimated pipeline value:  ${total_pipeline:,.0f}[/]")
+
     return prospects
 
 
-def _build_prospect_entry(lead_data: dict, followed_by_partners: list[str]) -> dict:
-    """Build a standardized prospect dict from lead data + partner connections."""
+def _build_prospect_entry(
+    lead_data: dict,
+    followed_by_partners: list[str],
+    engagement: dict | None = None,
+    revenue: dict | None = None,
+    profile: InstagramProfile | None = None,
+) -> dict:
+    """Build a standardized prospect dict with engagement and revenue data."""
     fc = lead_data.get("follower_count", 0)
+    eng = engagement or {}
+    rev = revenue or {}
+
     return {
         "username": lead_data["username"],
         "full_name": lead_data.get("full_name", ""),
@@ -359,6 +419,21 @@ def _build_prospect_entry(lead_data: dict, followed_by_partners: list[str]) -> d
         "followed_by_partners": followed_by_partners,
         "num_partners_connected": len(followed_by_partners),
         "partner_list": ", ".join(f"@{p}" for p in followed_by_partners),
+        # Engagement metrics
+        "avg_likes": eng.get("avg_likes", 0),
+        "avg_comments": eng.get("avg_comments", 0),
+        "engagement_rate": eng.get("engagement_rate", 0),
+        "posting_frequency": eng.get("posting_frequency", 0),
+        # Business account info
+        "is_business_account": getattr(profile, "is_business_account", False) if profile else False,
+        "ig_category": getattr(profile, "category", "") if profile else "",
+        # Revenue estimation
+        "business_size_tier": rev.get("business_size_tier", "unknown"),
+        "estimated_annual_revenue_low": rev.get("estimated_annual_revenue_low", 0),
+        "estimated_annual_revenue_high": rev.get("estimated_annual_revenue_high", 0),
+        "estimated_deal_value": rev.get("estimated_deal_value", 0),
+        "revenue_confidence": rev.get("revenue_confidence", "none"),
+        "revenue_signals": rev.get("revenue_signals", []),
     }
 
 
@@ -372,11 +447,32 @@ def _format_followers(count) -> str:
     return str(int(count))
 
 
+def _format_revenue(low, high) -> str:
+    if not low and not high:
+        return "-"
+    def _fmt(v):
+        if v >= 1_000_000:
+            return f"${v / 1_000_000:.1f}M"
+        if v >= 1_000:
+            return f"${v / 1_000:.0f}K"
+        return f"${v:.0f}"
+    return f"{_fmt(low)}–{_fmt(high)}"
+
+
 TIER_SHORT = {
     "tier1_whale": "WHALE",
     "tier2_agency": "AGENCY",
     "tier3_affiliate": "AFFIL",
     "tier4_seller": "SELLER",
+}
+
+SIZE_SHORT = {
+    "whale": "WHALE",
+    "large": "LARGE",
+    "medium": "MED",
+    "small": "SMALL",
+    "micro": "MICRO",
+    "unknown": "?",
 }
 
 NICHE_SHORT = {
@@ -395,26 +491,34 @@ def _print_results(prospects: list[dict], partners: list[str]):
         console.print("  [dim]No prospects found.[/]")
         return
 
-    # Overall summary table
     table = Table(title=f"Whop Prospects — {len(prospects)} Total")
     table.add_column("#", style="dim", width=3)
     table.add_column("Prospect", style="bold cyan")
     table.add_column("Score", justify="right")
     table.add_column("Tier", style="magenta")
+    table.add_column("Size", style="yellow")
+    table.add_column("Deal Value", justify="right", style="green")
     table.add_column("Niche", style="green")
     table.add_column("Followers", justify="right", style="dim")
-    table.add_column("Partners Who Follow", style="yellow")
+    table.add_column("Eng Rate", justify="right", style="dim")
+    table.add_column("Partners", style="yellow")
 
     for i, p in enumerate(prospects[:50], 1):
         score = p["overall_score"]
         score_style = "bold green" if score >= 0.7 else "yellow" if score >= 0.55 else "dim"
+        deal_val = p.get("estimated_deal_value", 0)
+        eng_rate = p.get("engagement_rate", 0)
+
         table.add_row(
             str(i),
             f"@{p['username']}",
             f"[{score_style}]{score:.2f}[/]",
             TIER_SHORT.get(p["tier"], p["tier"][:6] if p["tier"] else "?"),
+            SIZE_SHORT.get(p.get("business_size_tier", "unknown"), "?"),
+            f"${deal_val:,.0f}" if deal_val > 0 else "-",
             NICHE_SHORT.get(p["niche"], p["niche"][:5] if p["niche"] else "?"),
             _format_followers(p["follower_count"]),
+            f"{eng_rate:.1%}" if eng_rate > 0 else "-",
             p["partner_list"],
         )
 
@@ -423,8 +527,8 @@ def _print_results(prospects: list[dict], partners: list[str]):
     if len(prospects) > 50:
         console.print(f"  [dim]... and {len(prospects) - 50} more (see CSV for full list)[/]")
 
-    # Per-partner breakdown
-    console.print(f"\n[bold]Intros Each Partner Can Make:[/]\n")
+    # Per-partner breakdown sorted by deal value
+    console.print(f"\n[bold]Top Intros Each Partner Can Make:[/]\n")
 
     for partner in partners:
         partner_prospects = [
@@ -434,19 +538,25 @@ def _print_results(prospects: list[dict], partners: list[str]):
             console.print(f"  @{partner}: [dim]no prospects found in their followings[/]")
             continue
 
-        partner_prospects.sort(key=lambda x: -x["overall_score"])
-        console.print(f"  [bold]@{partner}[/] can intro you to [bold green]{len(partner_prospects)}[/] prospects:")
+        partner_prospects.sort(key=lambda x: -x.get("estimated_deal_value", 0))
+        total_value = sum(p.get("estimated_deal_value", 0) for p in partner_prospects)
+        console.print(
+            f"  [bold]@{partner}[/] — {len(partner_prospects)} intros "
+            f"(~${total_value:,.0f} total value):"
+        )
 
-        for p in partner_prospects[:10]:
+        for p in partner_prospects[:5]:
             tier = TIER_SHORT.get(p["tier"], "?")
+            size = SIZE_SHORT.get(p.get("business_size_tier", "unknown"), "?")
+            deal = p.get("estimated_deal_value", 0)
             foll = _format_followers(p["follower_count"])
             console.print(
-                f"    @{p['username']:<25} score:{p['overall_score']:.2f}  "
-                f"{tier:<7} {foll:>8}"
+                f"    @{p['username']:<25} ${deal:>8,.0f}  "
+                f"{tier:<7} {size:<6} {foll:>8}"
             )
 
-        if len(partner_prospects) > 10:
-            console.print(f"    [dim]... and {len(partner_prospects) - 10} more[/]")
+        if len(partner_prospects) > 5:
+            console.print(f"    [dim]... and {len(partner_prospects) - 5} more[/]")
         console.print()
 
 
@@ -466,6 +576,8 @@ def _save_results(
     for p in prospects:
         row = dict(p)
         row["followed_by_partners"] = ", ".join(row["followed_by_partners"])
+        if isinstance(row.get("revenue_signals"), list):
+            row["revenue_signals"] = "; ".join(row["revenue_signals"])
         csv_rows.append(row)
 
     df = pd.DataFrame(csv_rows)
@@ -475,6 +587,63 @@ def _save_results(
     with open(output_json, "w") as f:
         json.dump(prospects, f, indent=2, default=str)
     console.print(f"  Saved to {output_json}")
+
+
+# ── Partner brief generation ─────────────────────────────────────────────
+
+def generate_partner_brief(partner: str, prospects: list[dict], max_intros: int = 5) -> str:
+    """
+    Generate a ready-to-send WhatsApp/DM message for a referral partner
+    with their top prospects ranked by estimated deal value.
+    """
+    partner_prospects = [
+        p for p in prospects if partner in p.get("followed_by_partners", [])
+    ]
+    if not partner_prospects:
+        return ""
+
+    partner_prospects.sort(key=lambda x: -x.get("estimated_deal_value", 0))
+    top = partner_prospects[:max_intros]
+
+    lines = [f"Hey @{partner}! I found {len(top)} people you follow who'd be great fits for Whop:\n"]
+
+    for i, p in enumerate(top, 1):
+        username = p["username"]
+        niche = p.get("niche", "unknown")
+        size = p.get("business_size_tier", "unknown")
+        lead_type = p.get("lead_type", "")
+
+        desc_parts = []
+        if lead_type == "agency":
+            desc_parts.append("runs a marketing agency")
+        elif lead_type == "big_seller":
+            desc_parts.append("digital product creator")
+        elif lead_type == "mixed":
+            desc_parts.append("agency + creator")
+        elif lead_type == "platform_affiliate":
+            desc_parts.append("ecosystem connector")
+        else:
+            desc_parts.append("digital business")
+
+        if niche and niche != "unknown":
+            nice_niche = niche.replace("_", " ")
+            desc_parts.append(f"in {nice_niche}")
+
+        size_labels = {
+            "whale": "very large business",
+            "large": "established business",
+            "medium": "growing business",
+            "small": "early-stage",
+        }
+        if size in size_labels:
+            desc_parts.append(f"({size_labels[size]})")
+
+        desc = ", ".join(desc_parts)
+        lines.append(f"{i}. @{username} — {desc}")
+
+    lines.append("\nWould you be open to making an intro to any of them?")
+
+    return "\n".join(lines)
 
 
 # ── Standalone entry point ───────────────────────────────────────────────
