@@ -457,8 +457,65 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
     def cache_save(partner, data):
         db.save_following_cache(user, partner, data)
 
-    status_container = st.empty()
-    status_container.info(f"Starting scan for {len(partners)} partner(s)...")
+    # Step 1: Test Apify connection
+    with st.status("Testing API connections...", expanded=True) as status:
+        from apify_following import ApifyFollowingScraper, ApifyFollowingError
+        try:
+            test_scraper = ApifyFollowingScraper(api_token=keys.get("apify_api_token"))
+            apify_ok = test_scraper.test_connection()
+            if apify_ok:
+                st.write("Apify connection: OK")
+            else:
+                st.error("Apify connection FAILED. Check your API token in Settings.")
+                return
+        except ApifyFollowingError as e:
+            st.error(f"Apify error: {e}")
+            return
+        except Exception as e:
+            st.error(f"Apify connection error: {e}")
+            return
+
+        # Step 2: Scrape followings with visible progress
+        status.update(label="Scraping partner followings...", expanded=True)
+        scraper = ApifyFollowingScraper(api_token=keys.get("apify_api_token"))
+        all_followings = {}
+        total_accounts = 0
+
+        for i, partner in enumerate(partners):
+            st.write(f"Fetching @{partner} followings ({i+1}/{len(partners)})...")
+            try:
+                from whop_prospect_finder import scrape_partner_following
+                following = scrape_partner_following(
+                    partner, scraper,
+                    cache_load_fn=cache_load,
+                    cache_save_fn=cache_save,
+                    force_refresh=force_refresh,
+                )
+                count = len(following)
+                total_accounts += count
+                all_followings[partner] = following
+                if count > 0:
+                    st.write(f"  @{partner}: {count} followings found")
+                else:
+                    st.warning(f"  @{partner}: 0 followings returned (account may be private)")
+            except Exception as e:
+                st.error(f"  @{partner}: Error - {e}")
+                all_followings[partner] = []
+
+        st.write(f"**Total: {total_accounts} followings across {len(partners)} partners**")
+
+        if total_accounts == 0:
+            status.update(label="No followings found", state="error", expanded=True)
+            st.error(
+                "All partners returned 0 followings. Possible causes:\n"
+                "- Partner accounts may be private\n"
+                "- Apify actor may be having issues\n"
+                "- Try again in a few minutes"
+            )
+            return
+
+        # Step 3: Run the full qualification pipeline
+        status.update(label=f"Qualifying {total_accounts} accounts...", expanded=True)
 
     try:
         prospects = find_prospects(
@@ -471,10 +528,8 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
             cache_save_fn=cache_save,
             existing_prospects=existing,
             progress_save_fn=on_progress,
-            force_refresh=force_refresh,
+            force_refresh=False,
         )
-
-        status_container.empty()
 
         if prospects:
             total_value = sum(p.get("estimated_deal_value", 0) for p in prospects)
@@ -486,12 +541,10 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
         else:
             st.warning(
                 "No prospects found. This usually means:\n"
-                "- The Apify scrape returned empty (check your Apify credits at apify.com)\n"
                 "- All accounts were filtered out by the prefilter\n"
                 "- Try running with 'Skip new analysis' unchecked"
             )
     except Exception as e:
-        status_container.empty()
         st.error(f"Scan failed: {e}\n\nCheck that your API keys are valid in the Settings tab.")
 
 
