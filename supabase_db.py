@@ -130,9 +130,30 @@ def save_prospects(user: str, prospects: list[dict]) -> None:
         for col in PROSPECT_COLUMNS:
             row[col] = p.get(col)
         rows.append(row)
-    # Insert in batches of 500 to avoid payload limits
     for i in range(0, len(rows), 500):
         db.table("prospects").insert(rows[i : i + 500]).execute()
+
+
+def upsert_prospect(user: str, prospect: dict) -> None:
+    """Save a single prospect immediately (insert or update)."""
+    db = _get_client()
+    row = {"user_name": user}
+    for col in PROSPECT_COLUMNS:
+        row[col] = prospect.get(col)
+    row["created_at"] = datetime.now(timezone.utc).isoformat()
+
+    existing = (
+        db.table("prospects")
+        .select("id")
+        .eq("user_name", user)
+        .eq("username", prospect.get("username", ""))
+        .execute()
+    )
+
+    if existing.data:
+        db.table("prospects").update(row).eq("id", existing.data[0]["id"]).execute()
+    else:
+        db.table("prospects").insert(row).execute()
 
 
 # ── Outreach ─────────────────────────────────────────────────────────
