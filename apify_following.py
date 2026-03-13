@@ -124,29 +124,60 @@ class ApifyFollowingScraper:
             raise ApifyFollowingError("No dataset ID in Apify run result")
 
         try:
-            items_url = self._api_url(f"/datasets/{dataset_id}/items")
-            resp = requests.get(items_url, timeout=60)
+            items_url = self._api_url(f"/datasets/{dataset_id}/items") + "&format=json&clean=true"
+            resp = requests.get(items_url, timeout=120)
             resp.raise_for_status()
-            items = resp.json()
+            raw = resp.json()
         except requests.RequestException as e:
             raise ApifyFollowingError(f"Failed to fetch dataset: {e}")
 
-        logger.info(f"[Apify] Got {len(items)} raw items for @{username}")
+        # Handle both list and dict responses
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, dict):
+            items = raw.get("items", raw.get("data", [raw]))
+        else:
+            items = []
 
-        # Normalize the data — filter out error/message-only items
+        logger.info(f"[Apify] Got {len(items)} raw items for @{username}")
+        if items:
+            sample = items[0]
+            logger.info(f"[Apify] Sample item keys: {list(sample.keys())[:10]}")
+
+        # Normalize the data — handle multiple field name formats
         following = []
         for item in items:
-            if "message" in item and "username" not in item:
-                logger.warning(f"[Apify] Message from actor: {item['message'][:200]}")
+            if "message" in item and "username" not in item and "user_name" not in item:
+                logger.warning(f"[Apify] Message from actor: {item.get('message', '')[:200]}")
                 continue
 
+            uname = (
+                item.get("username")
+                or item.get("user_name")
+                or item.get("userName")
+                or ""
+            )
+            full_name = (
+                item.get("full_name")
+                or item.get("fullName")
+                or item.get("name")
+                or ""
+            )
+            pk = str(
+                item.get("id")
+                or item.get("pk")
+                or item.get("user_id")
+                or item.get("userId")
+                or ""
+            )
+
             normalized = {
-                "username": item.get("username", ""),
-                "full_name": item.get("full_name", ""),
-                "pk": str(item.get("id", item.get("pk", ""))),
-                "is_private": item.get("is_private", False),
-                "is_verified": item.get("is_verified", False),
-                "profile_pic_url": item.get("profile_pic_url", ""),
+                "username": uname,
+                "full_name": full_name,
+                "pk": pk,
+                "is_private": item.get("is_private", item.get("isPrivate", False)),
+                "is_verified": item.get("is_verified", item.get("isVerified", False)),
+                "profile_pic_url": item.get("profile_pic_url", item.get("profilePicUrl", "")),
             }
             if normalized["username"]:
                 following.append(normalized)
@@ -154,6 +185,18 @@ class ApifyFollowingScraper:
         logger.info(
             f"[Apify] Normalized {len(following)} following accounts for @{username}"
         )
+
+        if len(items) > 0 and len(following) == 0:
+            logger.error(
+                f"[Apify] DATA FORMAT MISMATCH: Got {len(items)} items but 0 normalized. "
+                f"First item keys: {list(items[0].keys()) if items else 'none'}"
+            )
+            raise ApifyFollowingError(
+                f"Apify returned {len(items)} items but none had a 'username' field. "
+                f"The actor output format may have changed. "
+                f"First item keys: {list(items[0].keys()) if items else 'none'}"
+            )
+
         return following
 
     def test_connection(self) -> bool:
