@@ -1,11 +1,8 @@
 """
 Apify integration for Instagram following list scraping.
 
-Uses the "thenetaji/instagram-following-scraper" actor on Apify via REST API.
-(We use requests directly instead of apify-client to avoid the impit/Rust crash on macOS.)
-
-Free tier: 100 results per run.
-Paid tier: unlimited results.
+Uses the "instaprism/instagram-following-scraper" actor on Apify via REST API.
+No Instagram login required. Pay-per-event: ~$2 per 1,000 results.
 """
 
 import logging
@@ -17,8 +14,7 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# Apify actor — works on free tier (with 100 result cap)
-ACTOR_ID = "thenetaji~instagram-following-scraper"
+ACTOR_ID = "instaprism~instagram-following-scraper"
 APIFY_BASE = "https://api.apify.com/v2"
 
 
@@ -54,20 +50,18 @@ class ApifyFollowingScraper:
             limit: Max followings to fetch (0 = all / up to plan limit)
 
         Returns:
-            List of dicts with keys: username, full_name, id (pk),
+            List of dicts with keys: username, full_name, pk,
             is_private, is_verified, profile_pic_url.
         """
         limit = limit or config.MAX_FOLLOWING_TO_FETCH
 
         logger.info(f"[Apify] Fetching following list for @{username} (limit={limit})")
 
-        # Prepare actor input
         run_input = {
-            "username": [username],
-            "type": "followings",
+            "username": username,
+            "limit": limit,
+            "extractEmails": False,
         }
-        if limit:
-            run_input["maxItem"] = limit
 
         # Start the actor run
         try:
@@ -88,10 +82,13 @@ class ApifyFollowingScraper:
 
         logger.info(f"[Apify] Run started: {run_id}")
 
-        # Poll for completion (up to 20 minutes)
-        max_wait = 1200
+        # Poll for completion (up to 30 minutes for large lists)
+        max_wait = 1800
         poll_interval = 5
         waited = 0
+        status = "UNKNOWN"
+        run_info = {}
+
         while waited < max_wait:
             time.sleep(poll_interval)
             waited += poll_interval
@@ -131,21 +128,18 @@ class ApifyFollowingScraper:
         except requests.RequestException as e:
             raise ApifyFollowingError(f"Failed to fetch dataset: {e}")
 
-        # Handle both list and dict responses
         if isinstance(raw, list):
             items = raw
         elif isinstance(raw, dict):
-            items = raw.get("items", raw.get("data", [raw]))
+            items = raw.get("items", raw.get("data", []))
         else:
             items = []
 
-        logger.info(f"[Apify] Got {len(items)} raw items for @{username}")
-
-        # If dataset is empty, try the key-value store (some actors store results there)
+        # If dataset empty, try key-value store OUTPUT
         if not items:
             kv_store_id = run_info.get("defaultKeyValueStoreId")
             if kv_store_id:
-                logger.info(f"[Apify] Dataset empty, trying key-value store {kv_store_id}")
+                logger.info(f"[Apify] Dataset empty, trying key-value store")
                 try:
                     kv_url = self._api_url(f"/key-value-stores/{kv_store_id}/records/OUTPUT")
                     kv_resp = requests.get(kv_url, timeout=60)
@@ -159,21 +153,22 @@ class ApifyFollowingScraper:
                 except Exception as e:
                     logger.warning(f"[Apify] Key-value store fetch failed: {e}")
 
+        logger.info(f"[Apify] Got {len(items)} raw items for @{username}")
+
         if not items:
             raise ApifyFollowingError(
                 f"Apify actor succeeded but returned 0 items for @{username}. "
-                f"Dataset ID: {dataset_id}. "
-                f"The actor may have changed its output format."
+                f"Dataset ID: {dataset_id}."
             )
 
         if items:
             sample = items[0]
-            logger.info(f"[Apify] Sample item keys: {list(sample.keys())[:10]}")
+            logger.info(f"[Apify] Sample item keys: {list(sample.keys())}")
 
-        # Normalize the data — handle multiple field name formats
+        # Normalize — handle both snake_case and camelCase field names
         following = []
         for item in items:
-            if "message" in item and "username" not in item and "user_name" not in item:
+            if "message" in item and "username" not in item and "userName" not in item:
                 logger.warning(f"[Apify] Message from actor: {item.get('message', '')[:200]}")
                 continue
 
@@ -184,16 +179,16 @@ class ApifyFollowingScraper:
                 or ""
             )
             full_name = (
-                item.get("full_name")
-                or item.get("fullName")
+                item.get("fullName")
+                or item.get("full_name")
                 or item.get("name")
                 or ""
             )
             pk = str(
-                item.get("id")
-                or item.get("pk")
+                item.get("userId")
                 or item.get("user_id")
-                or item.get("userId")
+                or item.get("id")
+                or item.get("pk")
                 or ""
             )
 
@@ -213,14 +208,9 @@ class ApifyFollowingScraper:
         )
 
         if len(items) > 0 and len(following) == 0:
-            logger.error(
-                f"[Apify] DATA FORMAT MISMATCH: Got {len(items)} items but 0 normalized. "
-                f"First item keys: {list(items[0].keys()) if items else 'none'}"
-            )
             raise ApifyFollowingError(
-                f"Apify returned {len(items)} items but none had a 'username' field. "
-                f"The actor output format may have changed. "
-                f"First item keys: {list(items[0].keys()) if items else 'none'}"
+                f"Apify returned {len(items)} items but none had a username field. "
+                f"Keys found: {list(items[0].keys())}"
             )
 
         return following
