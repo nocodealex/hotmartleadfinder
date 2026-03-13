@@ -69,20 +69,39 @@ GRAPH_MIN_APPEARANCES = 2
 GRAPH_APPEARANCE_BOOST = True
 
 # ── Scoring Weights ──────────────────────────────────────────────────
+# Sub-signal weights (used internally for fit score aggregation)
 WEIGHT_BIO = 0.25
 WEIGHT_WEBSITE = 0.20
 WEIGHT_CAPTIONS = 0.15
 WEIGHT_EVENTS = 0.10
-WEIGHT_APPEARANCES = 0.30           # Boosted from 0.10 → 0.30
+
+# Composite scoring: fit * 0.40 + size * 0.35 + warmth * 0.25
+WEIGHT_FIT = 0.40
+WEIGHT_SIZE = 0.35
+WEIGHT_WARMTH = 0.25
+
+# ── Revenue Estimation ──────────────────────────────────────────────
+REVENUE_TIER_WHALE = 1_000_000      # $1M+/yr
+REVENUE_TIER_LARGE = 200_000        # $200K-$1M/yr
+REVENUE_TIER_MEDIUM = 50_000        # $50K-$200K/yr
+REVENUE_TIER_SMALL = 10_000         # $10K-$50K/yr
+# Below SMALL = micro (<$10K/yr)
+
+REVENUE_MIDPOINTS = {
+    "whale": 2_000_000,
+    "large": 600_000,
+    "medium": 125_000,
+    "small": 30_000,
+    "micro": 5_000,
+    "unknown": 0,
+}
+
+TAKE_RATE = 0.01                    # 1% of gross profit
 
 # ── Lead Tiers ───────────────────────────────────────────────────────
-# Tier 1 (Whales): massive sellers, top affiliates, revenue 7+ figures
 TIER1_MIN_SCORE = 0.80
-# Tier 2 (Agencies): agency owners with multiple clients
 TIER2_MIN_SCORE = 0.65
-# Tier 3 (Affiliates): platform affiliates, co-producers
 TIER3_MIN_SCORE = 0.55
-# Tier 4 (Sellers): individual sellers who could switch
 TIER4_MIN_SCORE = 0.40
 
 # ── Claude Model ─────────────────────────────────────────────────────
