@@ -411,12 +411,17 @@ def _render_manage_partners(user: str):
         "Skip new analysis (match existing leads only — free & fast)",
         value=True,
     )
+    force_refresh = col_scan1.checkbox(
+        "Force refresh following lists (re-scrape from Instagram)",
+        value=False,
+        help="Use this if a partner's followings seem empty or outdated",
+    )
 
     if col_scan2.button("Run Scan", type="primary"):
-        _run_scan(user, partners, skip_new)
+        _run_scan(user, partners, skip_new, force_refresh)
 
 
-def _run_scan(user: str, partners: list[str], skip_new: bool):
+def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: bool = False):
     """Run the prospect finder for this user's partners."""
     from whop_prospect_finder import find_prospects
 
@@ -461,6 +466,7 @@ def _run_scan(user: str, partners: list[str], skip_new: bool):
                 cache_save_fn=cache_save,
                 existing_prospects=existing,
                 progress_save_fn=on_progress,
+                force_refresh=force_refresh,
             )
             if prospects:
                 total_value = sum(p.get("estimated_deal_value", 0) for p in prospects)
