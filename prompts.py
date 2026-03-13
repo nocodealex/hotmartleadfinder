@@ -107,6 +107,28 @@ Strong: "agencia," "consultoría," "lanzamientos digitales," \
 "Hotmart," "alumnos," "facturación," "curso online," \
 "tráfico pagado," "coproducción"
 
+## Business Size Estimation
+Based on ALL available signals, estimate how big this person's \
+business is. Use these categories:
+- "whale": $1M+/year revenue — massive audience (500K+), multiple \
+  products/services, team mentions, "8 dígitos", agency with many clients
+- "large": $200K–$1M/year — strong audience (100K-500K), established \
+  courses/agency, "7 dígitos", multiple revenue streams
+- "medium": $50K–$200K/year — moderate audience (20K-100K), active \
+  seller/agency, "6 dígitos", growing business
+- "small": $10K–$50K/year — smaller audience (<20K), starting out, \
+  single product, early-stage
+- "micro": Under $10K/year — very early stage, hobbyist
+- "unknown": Not enough information to estimate
+
+Key size signals to look for:
+- Follower count as audience reach proxy
+- Revenue claims: "6 dígitos," "7 dígitos," "8 dígitos," "R$X," "$X"
+- Student/client counts: "X alunos," "X clientes," "+X empresas"
+- Team size: "equipe de X," "X colaboradores"
+- Multiple products or business lines
+- Business account with professional category
+
 ## Important Notes
 - Do NOT filter by follower count. A seller with 5K followers can \
   be just as valuable as one with 500K.
@@ -123,6 +145,8 @@ Bio: {bio}
 Follower Count: {follower_count}
 Following Count: {following_count}
 Is Verified: {is_verified}
+Is Business Account: {is_business_account}
+Account Category: {category}
 
 ## Niche Detection
 Also identify the lead's niche/vertical if possible. High-value niches \
@@ -137,7 +161,7 @@ for Whop (they generate the most revenue):
 - "unknown" — can't determine from bio alone
 
 Respond with ONLY valid JSON — no markdown fences, no extra text:
-{{"score": <float 0.0–1.0>, "classification": "<high_value | potential_value | not_valuable>", "lead_type": "<agency | big_seller | platform_affiliate | mixed | none>", "niche": "<business_coaching | financial_education | marketing | personal_development | health_fitness | education | other | unknown>", "reasoning": "<2-3 sentences>", "key_signals": [<list of signals found>], "language": "<portuguese | spanish | english | other>"}}"""
+{{"score": <float 0.0–1.0>, "classification": "<high_value | potential_value | not_valuable>", "lead_type": "<agency | big_seller | platform_affiliate | mixed | none>", "niche": "<business_coaching | financial_education | marketing | personal_development | health_fitness | education | other | unknown>", "reasoning": "<2-3 sentences>", "key_signals": [<list of signals found>], "language": "<portuguese | spanish | english | other>", "business_size_tier": "<whale | large | medium | small | micro | unknown>", "revenue_confidence": "<high | medium | low>", "size_signals": [<list of signals that informed the size estimate>]}}"""
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -180,8 +204,25 @@ Linked in the bio of @{username} ({full_name}).
 - Tech / SaaS product unrelated to digital product selling
 - Generic link-in-bio with only social media links
 
+## Business Size & Revenue Signals
+Also analyze the website for business size indicators:
+- Pricing pages: course prices, service packages, consulting rates
+- Student/client counts: "X alunos," testimonial counts, case studies
+- Team pages: number of employees, departments
+- Revenue claims: launch results, client results, revenue screenshots
+- Multiple products/courses listed (more products = larger business)
+- Professional design and infrastructure (custom domain, proper branding)
+
+Estimate business size tier:
+- "whale": $1M+/yr — large team, many products, enterprise clients
+- "large": $200K–$1M/yr — established business, multiple offerings
+- "medium": $50K–$200K/yr — growing business, a few products/services
+- "small": $10K–$50K/yr — single product, basic setup
+- "micro": <$10K/yr — very basic, just starting
+- "unknown": can't determine
+
 Respond with ONLY valid JSON:
-{{"score": <float 0.0–1.0>, "classification": "<high_value | potential_value | not_valuable | inconclusive>", "reasoning": "<2-3 sentences>", "services_or_products_found": [<list>], "mentions_hotmart": <true|false>}}"""
+{{"score": <float 0.0–1.0>, "classification": "<high_value | potential_value | not_valuable | inconclusive>", "reasoning": "<2-3 sentences>", "services_or_products_found": [<list>], "mentions_hotmart": <true|false>, "business_size_tier": "<whale | large | medium | small | micro | unknown>", "pricing_found": [<list of price points found, e.g. "$297 course", "$2000/mo retainer">], "student_or_client_count": <number or null if not found>, "product_count": <number of distinct products/services found>}}"""
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -220,6 +261,22 @@ for Whop — a platform competing with Hotmart for digital product sellers.
 - Tech / SaaS content unrelated to digital product selling
 - Pure motivational content with no business context
 
+## Revenue & Scale Analysis
+Also look for concrete revenue and scale signals in captions:
+- Revenue claims/screenshots: "faturamos X," "R$ X em vendas," "$X in sales"
+- Launch results: "lançamento de X dígitos," "X em 7 dias"
+- Student/client counts: "X alunos novos," "X clientes atendidos"
+- Team growth: "contratamos X pessoas," "equipe cresceu"
+- Business milestones: awards, revenue marks, expansion
+
+Estimate the business scale:
+- "whale": Consistent $1M+/yr signals (massive launches, huge team)
+- "large": $200K–$1M/yr signals (regular 6-7 figure launches)
+- "medium": $50K–$200K/yr signals (growing, moderate launches)
+- "small": $10K–$50K/yr signals (early stage, small launches)
+- "micro": <$10K/yr (just starting, no revenue signals)
+- "unknown": Can't determine from captions
+
 ## Notes
 - Captions are typically in Portuguese (Brazil) or Spanish
 - Even 1–2 posts showing client work, course launches, or Hotmart \
@@ -228,7 +285,7 @@ for Whop — a platform competing with Hotmart for digital product sellers.
   ecosystem?
 
 Respond with ONLY valid JSON:
-{{"score": <float 0.0–1.0>, "classification": "<high_value | potential_value | not_valuable>", "reasoning": "<2-3 sentences>", "key_signals": [<list of signals found>], "mentions_hotmart": <true|false>, "is_digital_product_seller": <true|false>, "serves_clients": <true|false>}}"""
+{{"score": <float 0.0–1.0>, "classification": "<high_value | potential_value | not_valuable>", "reasoning": "<2-3 sentences>", "key_signals": [<list of signals found>], "mentions_hotmart": <true|false>, "is_digital_product_seller": <true|false>, "serves_clients": <true|false>, "business_size_tier": "<whale | large | medium | small | micro | unknown>", "revenue_claims": [<list of specific revenue/scale claims found in captions>]}}"""
 
 
 # ─────────────────────────────────────────────────────────────────────
