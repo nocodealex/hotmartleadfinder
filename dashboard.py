@@ -435,6 +435,8 @@ def _run_scan(user: str, partners: list[str], skip_new: bool):
 
     exclude = set(partners) | {"aymon_holth", "nocode.alex"}
 
+    existing = db.load_prospects(user)
+
     def on_save(prospects):
         db.save_prospects(user, prospects)
 
@@ -454,6 +456,7 @@ def _run_scan(user: str, partners: list[str], skip_new: bool):
                 save_callback=on_save,
                 cache_load_fn=cache_load,
                 cache_save_fn=cache_save,
+                existing_prospects=existing,
             )
             if prospects:
                 total_value = sum(p.get("estimated_deal_value", 0) for p in prospects)
