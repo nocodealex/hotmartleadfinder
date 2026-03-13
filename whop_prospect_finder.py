@@ -166,6 +166,7 @@ def find_prospects(
     save_callback=None,
     cache_load_fn=None,
     cache_save_fn=None,
+    existing_prospects: list[dict] | None = None,
 ):
     """
     Scan referral partners' followings for Whop prospects.
@@ -181,6 +182,7 @@ def find_prospects(
         save_callback: Optional function(prospects) called to save results (e.g. to Supabase)
         cache_load_fn: Optional function(partner) -> list[dict] | None for loading following cache
         cache_save_fn: Optional function(partner, data) for saving following cache
+        existing_prospects: Previously scanned prospects (from Supabase) to skip re-analysis
     """
     min_score = min_score or config.LEAD_SCORE_THRESHOLD
     partners = partners or REFERRAL_PARTNERS
@@ -235,6 +237,12 @@ def find_prospects(
 
     existing_leads = storage.get_all_leads()
     existing_lead_map = {l["username"].lower(): l for l in existing_leads}
+
+    if existing_prospects:
+        for p in existing_prospects:
+            uname = p.get("username", "").lower()
+            if uname and uname not in existing_lead_map:
+                existing_lead_map[uname] = p
 
     prospects: list[dict] = []
     new_analyzed = 0
