@@ -262,6 +262,7 @@ class PipedriveClient:
         name = prospect.get("full_name", "").strip()
 
         result["crm_status"] = "Not in CRM"
+        result["crm_tag"] = "new"
         result["crm_person_id"] = None
         result["crm_person_name"] = ""
         result["crm_deal_stage"] = ""
@@ -276,6 +277,7 @@ class PipedriveClient:
             return result
 
         result["crm_status"] = "In CRM"
+        result["crm_tag"] = "no_deal"
         result["crm_person_id"] = person["id"]
         result["crm_person_name"] = person.get("name", "")
 
@@ -287,12 +289,14 @@ class PipedriveClient:
             if won_deals:
                 best = won_deals[0]
                 result["crm_status"] = "Won"
+                result["crm_tag"] = "won_deal"
                 result["crm_deal_stage"] = "Won"
                 result["crm_deal_status"] = "won"
                 result["crm_pipeline"] = best.get("pipeline_name", "")
             elif active_deals:
                 best = active_deals[0]
                 result["crm_status"] = best.get("stage_name", "Active Deal")
+                result["crm_tag"] = "active_deal"
                 result["crm_deal_stage"] = best.get("stage_name", "")
                 result["crm_deal_status"] = "open"
                 result["crm_pipeline"] = best.get("pipeline_name", "")
@@ -300,6 +304,7 @@ class PipedriveClient:
                 lost = [d for d in deals if d["status"] == "lost"]
                 if lost:
                     result["crm_status"] = "Lost"
+                    result["crm_tag"] = "lost_deal"
                     result["crm_deal_stage"] = "Lost"
                     result["crm_deal_status"] = "lost"
                     result["crm_pipeline"] = lost[0].get("pipeline_name", "")
