@@ -443,7 +443,10 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
     existing = db.load_prospects(user)
 
     def on_save(prospects):
-        db.save_prospects(user, prospects)
+        if prospects:
+            db.save_prospects(user, prospects)
+        else:
+            st.warning("Scan returned 0 results — keeping your existing prospect data.")
 
     def on_progress(prospect):
         db.upsert_prospect(user, prospect)
@@ -454,31 +457,42 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
     def cache_save(partner, data):
         db.save_following_cache(user, partner, data)
 
-    with st.spinner(f"Scanning followings for {len(partners)} partner(s)... This may take a few minutes."):
-        try:
-            prospects = find_prospects(
-                partners=partners,
-                skip_new=skip_new,
-                exclude_usernames=exclude,
-                api_keys=keys,
-                save_callback=on_save,
-                cache_load_fn=cache_load,
-                cache_save_fn=cache_save,
-                existing_prospects=existing,
-                progress_save_fn=on_progress,
-                force_refresh=force_refresh,
+    status_container = st.empty()
+    status_container.info(f"Starting scan for {len(partners)} partner(s)...")
+
+    try:
+        prospects = find_prospects(
+            partners=partners,
+            skip_new=skip_new,
+            exclude_usernames=exclude,
+            api_keys=keys,
+            save_callback=on_save,
+            cache_load_fn=cache_load,
+            cache_save_fn=cache_save,
+            existing_prospects=existing,
+            progress_save_fn=on_progress,
+            force_refresh=force_refresh,
+        )
+
+        status_container.empty()
+
+        if prospects:
+            total_value = sum(p.get("estimated_deal_value", 0) for p in prospects)
+            st.success(
+                f"Found {len(prospects)} prospects! "
+                f"Estimated pipeline value: {format_deal_value(total_value)}. "
+                f"Switch to the other tabs to view results."
             )
-            if prospects:
-                total_value = sum(p.get("estimated_deal_value", 0) for p in prospects)
-                st.success(
-                    f"Found {len(prospects)} prospects! "
-                    f"Estimated pipeline value: {format_deal_value(total_value)}. "
-                    f"Switch to the other tabs to view results."
-                )
-            else:
-                st.warning("No prospects found. Try adding more partners or running without 'skip new analysis'.")
-        except Exception as e:
-            st.error(f"Scan failed: {e}")
+        else:
+            st.warning(
+                "No prospects found. This usually means:\n"
+                "- The Apify scrape returned empty (check your Apify credits at apify.com)\n"
+                "- All accounts were filtered out by the prefilter\n"
+                "- Try running with 'Skip new analysis' unchecked"
+            )
+    except Exception as e:
+        status_container.empty()
+        st.error(f"Scan failed: {e}\n\nCheck that your API keys are valid in the Settings tab.")
 
 
 # ── Partner Briefs ───────────────────────────────────────────────────
