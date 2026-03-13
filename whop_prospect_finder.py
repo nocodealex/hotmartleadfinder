@@ -66,6 +66,7 @@ def scrape_partner_following(
     cache_dir: Path | None = None,
     cache_load_fn=None,
     cache_save_fn=None,
+    force_refresh: bool = False,
 ) -> list[dict]:
     """
     Fetch who a partner follows, with caching.
@@ -73,21 +74,23 @@ def scrape_partner_following(
     If cache_load_fn/cache_save_fn are provided (e.g. Supabase callbacks),
     they are used instead of the local filesystem cache.
     """
-    if cache_load_fn is not None:
-        cached = cache_load_fn(partner)
-        if cached is not None:
-            logger.info(f"[@{partner}] Loaded {len(cached)} followings from DB cache")
-            return cached
+    if not force_refresh:
+        if cache_load_fn is not None:
+            cached = cache_load_fn(partner)
+            if cached is not None and len(cached) > 0:
+                logger.info(f"[@{partner}] Loaded {len(cached)} followings from DB cache")
+                return cached
 
-    if cache_load_fn is None:
-        cache_dir = cache_dir or DEFAULT_FOLLOWINGS_CACHE_DIR
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_file = cache_dir / f"{partner}.json"
+        if cache_load_fn is None:
+            cache_dir = cache_dir or DEFAULT_FOLLOWINGS_CACHE_DIR
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = cache_dir / f"{partner}.json"
 
-        if cache_file.exists():
-            cached = json.loads(cache_file.read_text())
-            logger.info(f"[@{partner}] Loaded {len(cached)} followings from file cache")
-            return cached
+            if cache_file.exists():
+                cached = json.loads(cache_file.read_text())
+                if cached:
+                    logger.info(f"[@{partner}] Loaded {len(cached)} followings from file cache")
+                    return cached
 
     logger.info(f"[@{partner}] Scraping following list via Apify...")
     try:
@@ -98,13 +101,14 @@ def scrape_partner_following(
 
     logger.info(f"[@{partner}] Got {len(following)} followings")
 
-    if cache_save_fn is not None:
-        cache_save_fn(partner, following)
-    else:
-        cache_dir = cache_dir or DEFAULT_FOLLOWINGS_CACHE_DIR
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_file = cache_dir / f"{partner}.json"
-        cache_file.write_text(json.dumps(following, default=str))
+    if following:
+        if cache_save_fn is not None:
+            cache_save_fn(partner, following)
+        else:
+            cache_dir = cache_dir or DEFAULT_FOLLOWINGS_CACHE_DIR
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = cache_dir / f"{partner}.json"
+            cache_file.write_text(json.dumps(following, default=str))
 
     return following
 
@@ -168,6 +172,7 @@ def find_prospects(
     cache_save_fn=None,
     existing_prospects: list[dict] | None = None,
     progress_save_fn=None,
+    force_refresh: bool = False,
 ):
     """
     Scan referral partners' followings for Whop prospects.
@@ -185,6 +190,7 @@ def find_prospects(
         cache_save_fn: Optional function(partner, data) for saving following cache
         existing_prospects: Previously scanned prospects (from Supabase) to skip re-analysis
         progress_save_fn: Optional function(prospect_dict) to save each prospect immediately
+        force_refresh: If True, re-scrape all following lists (ignore cache)
     """
     min_score = min_score or config.LEAD_SCORE_THRESHOLD
     partners = partners or REFERRAL_PARTNERS
@@ -217,6 +223,7 @@ def find_prospects(
             cache_dir=cache_dir,
             cache_load_fn=cache_load_fn,
             cache_save_fn=cache_save_fn,
+            force_refresh=force_refresh,
         )
 
         usernames = set()
