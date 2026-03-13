@@ -1,22 +1,24 @@
 """
 Apify integration for Instagram following list scraping.
 
-Primary actor: "data-slayer/instagram-following" (100% success rate, no login)
-Fallback actor: "thenetaji/instagram-following-scraper" (82.5% success, no login)
+Strategy:
+  1. Try "thenetaji/instagram-following-scraper" via synchronous endpoint
+     (bypasses empty-dataset bug by returning items in HTTP response).
+  2. Fall back to "data-slayer/instagram-following" if thenetaji fails.
+  3. Pick whichever returns more results.
 """
 
 import logging
 import math
 import time
 import requests
-from typing import Optional
 
 import config
 
 logger = logging.getLogger(__name__)
 
-PRIMARY_ACTOR = "data-slayer~instagram-following"
-FALLBACK_ACTOR = "thenetaji~instagram-following-scraper"
+THENETAJI_ACTOR = "thenetaji~instagram-following-scraper"
+DATASLAYER_ACTOR = "data-slayer~instagram-following"
 APIFY_BASE = "https://api.apify.com/v2"
 FOLLOWINGS_PER_PAGE = 50
 
@@ -48,7 +50,8 @@ class ApifyFollowingScraper:
         """
         Fetch the following list for an Instagram user.
 
-        Tries the primary actor first, then falls back to the secondary.
+        Tries thenetaji (sync endpoint) first, then data-slayer as fallback.
+        Returns whichever gives more results.
 
         Returns:
             List of dicts with keys: username, full_name, pk,
@@ -56,34 +59,53 @@ class ApifyFollowingScraper:
         """
         limit = limit or config.MAX_FOLLOWING_TO_FETCH
 
+        # Try primary (thenetaji) via sync endpoint
+        primary_result = []
         try:
-            return self._run_primary(username, limit)
+            primary_result = self._run_thenetaji_sync(username, limit)
+            logger.info(
+                f"[Apify] thenetaji returned {len(primary_result)} for @{username}"
+            )
+            if len(primary_result) >= 20:
+                return primary_result
         except ApifyFollowingError as e:
-            logger.warning(f"[Apify] Primary actor failed for @{username}: {e}")
-            logger.info(f"[Apify] Trying fallback actor for @{username}...")
+            logger.warning(f"[Apify] thenetaji failed for @{username}: {e}")
 
-        return self._run_fallback(username, limit)
+        # Try fallback (data-slayer) via async polling
+        fallback_result = []
+        try:
+            fallback_result = self._run_dataslayer(username, limit)
+            logger.info(
+                f"[Apify] data-slayer returned {len(fallback_result)} for @{username}"
+            )
+        except ApifyFollowingError as e:
+            logger.warning(f"[Apify] data-slayer failed for @{username}: {e}")
 
-    # ── Primary: data-slayer/instagram-following ─────────────────────────
+        # Return whichever got more results
+        if len(primary_result) >= len(fallback_result):
+            best = primary_result
+            source = "thenetaji"
+        else:
+            best = fallback_result
+            source = "data-slayer"
 
-    def _run_primary(self, username: str, limit: int) -> list[dict]:
-        max_pages = max(1, math.ceil(limit / FOLLOWINGS_PER_PAGE))
-        logger.info(
-            f"[Apify/primary] @{username} limit={limit} maxPages={max_pages}"
-        )
+        if not best:
+            raise ApifyFollowingError(
+                f"Both Apify actors failed or returned 0 items for @{username}."
+            )
 
-        run_input = {
-            "username": username,
-            "maxPages": max_pages,
-        }
+        logger.info(f"[Apify] Using {source} ({len(best)} items) for @{username}")
+        return best
 
-        items = self._start_and_collect(PRIMARY_ACTOR, run_input, username)
-        return self._normalize(items, username)
+    # ── thenetaji: synchronous endpoint (items returned in response) ────
 
-    # ── Fallback: thenetaji/instagram-following-scraper ──────────────────
-
-    def _run_fallback(self, username: str, limit: int) -> list[dict]:
-        logger.info(f"[Apify/fallback] @{username} limit={limit}")
+    def _run_thenetaji_sync(self, username: str, limit: int) -> list[dict]:
+        """
+        Run thenetaji actor using the sync endpoint that returns dataset
+        items directly in the HTTP response body, bypassing the separate
+        dataset-fetch step that was returning empty.
+        """
+        logger.info(f"[Apify/thenetaji] @{username} limit={limit} (sync mode)")
 
         run_input = {
             "username": [username],
@@ -92,12 +114,67 @@ class ApifyFollowingScraper:
             "profileEnriched": False,
         }
 
-        items = self._start_and_collect(FALLBACK_ACTOR, run_input, username)
+        url = (
+            f"{APIFY_BASE}/acts/{THENETAJI_ACTOR}/run-sync-get-dataset-items"
+            f"?token={self.api_token}&timeout=600&format=json"
+        )
+
+        try:
+            resp = requests.post(
+                url,
+                json=run_input,
+                headers={"Content-Type": "application/json"},
+                timeout=660,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            raise ApifyFollowingError(f"thenetaji sync call failed: {e}")
+
+        raw = resp.json()
+
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, dict):
+            items = raw.get("items", raw.get("data", []))
+            if not items and "id" in raw:
+                raise ApifyFollowingError(
+                    "thenetaji sync returned run metadata instead of items. "
+                    "Actor may have timed out."
+                )
+        else:
+            items = []
+
+        if not items:
+            raise ApifyFollowingError(
+                f"thenetaji sync returned 0 items for @{username}"
+            )
+
+        logger.info(
+            f"[Apify/thenetaji] Got {len(items)} raw items. "
+            f"Sample keys: {list(items[0].keys())}"
+        )
+
         return self._normalize(items, username)
 
-    # ── Shared run + collect logic ──────────────────────────────────────
+    # ── data-slayer: async polling ──────────────────────────────────────
 
-    def _start_and_collect(
+    def _run_dataslayer(self, username: str, limit: int) -> list[dict]:
+        max_pages = min(100, max(1, math.ceil(limit / FOLLOWINGS_PER_PAGE)))
+        logger.info(
+            f"[Apify/data-slayer] @{username} limit={limit} maxPages={max_pages}"
+        )
+
+        run_input = {
+            "username": username,
+            "maxPages": max_pages,
+        }
+
+        items = self._start_and_poll(DATASLAYER_ACTOR, run_input, username)
+        return self._normalize(items, username)
+
+    # ── Shared async polling logic ──────────────────────────────────────
+
+    def _start_and_poll(
         self, actor_id: str, run_input: dict, username: str
     ) -> list[dict]:
         actor_label = actor_id.split("~")[0]
@@ -115,14 +192,13 @@ class ApifyFollowingScraper:
             run_id = run_data.get("id")
             if not run_id:
                 raise ApifyFollowingError(
-                    f"[{actor_label}] No run ID returned: {resp.text[:300]}"
+                    f"[{actor_label}] No run ID: {resp.text[:300]}"
                 )
         except requests.RequestException as e:
             raise ApifyFollowingError(f"[{actor_label}] Failed to start: {e}")
 
         logger.info(f"[Apify/{actor_label}] Run started: {run_id}")
 
-        # Poll for completion (up to 30 minutes)
         max_wait = 1800
         poll_interval = 5
         waited = 0
@@ -150,14 +226,15 @@ class ApifyFollowingScraper:
                 break
 
             if waited % 30 == 0:
-                logger.info(f"[Apify/{actor_label}] Still running... ({waited}s)")
+                logger.info(
+                    f"[Apify/{actor_label}] Still running... ({waited}s)"
+                )
 
         if status != "SUCCEEDED":
             raise ApifyFollowingError(
-                f"Apify actor finished with status: {status}"
+                f"[{actor_label}] Finished with status: {status}"
             )
 
-        # Fetch results from dataset
         dataset_id = run_info.get("defaultDatasetId")
         if not dataset_id:
             raise ApifyFollowingError(
@@ -183,16 +260,14 @@ class ApifyFollowingScraper:
         else:
             items = []
 
-        # Fallback: check key-value store OUTPUT
+        # Fallback: key-value store
         if not items:
-            kv_store_id = run_info.get("defaultKeyValueStoreId")
-            if kv_store_id:
-                logger.info(
-                    f"[Apify/{actor_label}] Dataset empty, trying key-value store"
-                )
+            kv_id = run_info.get("defaultKeyValueStoreId")
+            if kv_id:
+                logger.info(f"[Apify/{actor_label}] Dataset empty, trying KV store")
                 try:
                     kv_url = self._api_url(
-                        f"/key-value-stores/{kv_store_id}/records/OUTPUT"
+                        f"/key-value-stores/{kv_id}/records/OUTPUT"
                     )
                     kv_resp = requests.get(kv_url, timeout=60)
                     if kv_resp.status_code == 200:
@@ -208,9 +283,7 @@ class ApifyFollowingScraper:
                             f"[Apify/{actor_label}] Got {len(items)} from KV store"
                         )
                 except Exception as e:
-                    logger.warning(
-                        f"[Apify/{actor_label}] KV store fetch failed: {e}"
-                    )
+                    logger.warning(f"[Apify/{actor_label}] KV fetch failed: {e}")
 
         logger.info(
             f"[Apify/{actor_label}] Got {len(items)} raw items for @{username}"
@@ -218,14 +291,13 @@ class ApifyFollowingScraper:
 
         if not items:
             raise ApifyFollowingError(
-                f"Apify actor ({actor_label}) succeeded but returned 0 items "
-                f"for @{username}. Dataset ID: {dataset_id}."
+                f"[{actor_label}] Succeeded but 0 items for @{username}. "
+                f"Dataset: {dataset_id}."
             )
 
         if items:
-            sample = items[0]
             logger.info(
-                f"[Apify/{actor_label}] Sample keys: {list(sample.keys())}"
+                f"[Apify/{actor_label}] Sample keys: {list(items[0].keys())}"
             )
 
         return items
