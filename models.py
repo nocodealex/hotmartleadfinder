@@ -36,6 +36,8 @@ class InstagramProfile:
     is_private: bool = False
     is_verified: bool = False
     profile_pic_url: Optional[str] = None
+    is_business_account: bool = False
+    category: str = ""
 
     @classmethod
     def from_api_response(cls, data: dict) -> "InstagramProfile":
@@ -62,6 +64,8 @@ class InstagramProfile:
             is_private=user.get("is_private", False),
             is_verified=user.get("is_verified", False),
             profile_pic_url=user.get("profile_pic_url", user.get("profile_pic_url_hd", "")),
+            is_business_account=user.get("is_business", user.get("is_business_account", False)),
+            category=user.get("category", user.get("category_name", "")),
         )
 
 
