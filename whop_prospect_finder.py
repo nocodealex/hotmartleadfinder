@@ -167,6 +167,7 @@ def find_prospects(
     cache_load_fn=None,
     cache_save_fn=None,
     existing_prospects: list[dict] | None = None,
+    progress_save_fn=None,
 ):
     """
     Scan referral partners' followings for Whop prospects.
@@ -183,6 +184,7 @@ def find_prospects(
         cache_load_fn: Optional function(partner) -> list[dict] | None for loading following cache
         cache_save_fn: Optional function(partner, data) for saving following cache
         existing_prospects: Previously scanned prospects (from Supabase) to skip re-analysis
+        progress_save_fn: Optional function(prospect_dict) to save each prospect immediately
     """
     min_score = min_score or config.LEAD_SCORE_THRESHOLD
     partners = partners or REFERRAL_PARTNERS
@@ -359,6 +361,12 @@ def find_prospects(
                                 profile=profile,
                             )
                             prospects.append(prospect_entry)
+
+                            if progress_save_fn is not None:
+                                try:
+                                    progress_save_fn(prospect_entry)
+                                except Exception as e:
+                                    logger.warning(f"Progress save failed for @{username}: {e}")
 
             except CreditExhaustedError:
                 console.print(
