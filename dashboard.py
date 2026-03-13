@@ -475,7 +475,7 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
             st.error(f"Apify connection error: {e}")
             return
 
-        # Step 2: Scrape followings with visible progress
+        # Step 2: Load or scrape followings with visible progress
         status.update(label="Scraping partner followings...", expanded=True)
         scraper = ApifyFollowingScraper(api_token=keys.get("apify_api_token"))
         all_followings = {}
@@ -484,6 +484,15 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
         for i, partner in enumerate(partners):
             st.write(f"Fetching @{partner} followings ({i+1}/{len(partners)})...")
             try:
+                if not force_refresh:
+                    cached = cache_load(partner)
+                    if cached and len(cached) > 0:
+                        count = len(cached)
+                        total_accounts += count
+                        all_followings[partner] = cached
+                        st.write(f"  @{partner}: {count} followings (cached)")
+                        continue
+
                 following = scraper.get_following(partner, limit=0)
                 count = len(following)
                 total_accounts += count
@@ -495,7 +504,13 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
                     st.warning(f"  @{partner}: 0 followings returned (account may be private)")
             except Exception as e:
                 st.error(f"  @{partner}: Error - {e}")
-                all_followings[partner] = []
+                cached_fallback = cache_load(partner)
+                if cached_fallback and len(cached_fallback) > 0:
+                    all_followings[partner] = cached_fallback
+                    total_accounts += len(cached_fallback)
+                    st.write(f"  @{partner}: using {len(cached_fallback)} cached followings as fallback")
+                else:
+                    all_followings[partner] = []
 
         st.write(f"**Total: {total_accounts} followings across {len(partners)} partners**")
 
