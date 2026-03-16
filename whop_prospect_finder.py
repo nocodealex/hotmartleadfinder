@@ -257,6 +257,9 @@ def find_prospects(
     new_analyzed = 0
     skipped_prefilter = 0
     skipped_private = 0
+    skipped_no_profile = 0
+    skipped_api_error = 0
+    skipped_whop_seller = 0
     already_known = 0
 
     accounts_to_process = sorted(
@@ -289,12 +292,14 @@ def find_prospects(
                 continue
 
             if storage.is_whop_seller(username):
+                skipped_whop_seller += 1
                 progress.advance(task)
                 continue
 
             try:
                 profile = ig.get_profile(username)
                 if not profile:
+                    skipped_no_profile += 1
                     progress.advance(task)
                     continue
 
@@ -382,8 +387,10 @@ def find_prospects(
                 )
                 break
             except InstagramAPIError as e:
+                skipped_api_error += 1
                 logger.warning(f"API error for @{username}: {e}")
             except Exception as e:
+                skipped_api_error += 1
                 logger.warning(f"Error analysing @{username}: {e}")
 
             progress.advance(task)
@@ -401,19 +408,33 @@ def find_prospects(
         _save_results(prospects, output_csv, output_json)
 
     # Stats
+    stats = {
+        "total_unique": total_unique,
+        "already_known": already_known,
+        "new_analyzed": new_analyzed,
+        "skipped_prefilter": skipped_prefilter,
+        "skipped_private": skipped_private,
+        "skipped_no_profile": skipped_no_profile,
+        "skipped_api_error": skipped_api_error,
+        "skipped_whop_seller": skipped_whop_seller,
+        "prospects_found": len(prospects),
+    }
+
     console.print(f"\n[bold]Stats:[/]")
     console.print(f"  Already-known leads matched: {already_known}")
     if not skip_new:
         console.print(f"  New accounts analyzed:       {new_analyzed}")
         console.print(f"  Skipped (prefilter):         {skipped_prefilter}")
         console.print(f"  Skipped (private):           {skipped_private}")
+        console.print(f"  Skipped (no profile):        {skipped_no_profile}")
+        console.print(f"  Skipped (API errors):        {skipped_api_error}")
     console.print(f"  Total prospects found:       {len(prospects)}")
 
     total_pipeline = sum(p.get("estimated_deal_value", 0) for p in prospects)
     if total_pipeline > 0:
         console.print(f"  [bold green]Estimated pipeline value:  ${total_pipeline:,.0f}[/]")
 
-    return prospects
+    return prospects, stats
 
 
 def _build_prospect_entry(
