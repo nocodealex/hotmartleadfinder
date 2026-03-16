@@ -105,37 +105,156 @@ class InstagramClient:
             logger.error(f"Failed to parse profile for @{username}: {e}")
             return None
 
+    def get_following_paginated(
+        self, username: str, limit: int = 0
+    ) -> list[dict]:
+        """
+        Fetch the following list for a user via RapidAPI with pagination.
+
+        Makes repeated calls to /following, using the cursor from each
+        response to fetch the next page. Each page returns ~25-50 accounts.
+
+        Args:
+            username: Instagram username.
+            limit: Max followings to fetch (0 = use config default).
+
+        Returns:
+            List of dicts with keys: username, full_name, pk,
+            is_private, is_verified, profile_pic_url.
+        """
+        limit = limit or config.MAX_FOLLOWING_TO_FETCH
+        endpoint = config.ENDPOINTS["user_following"]
+
+        user_id = self.get_user_id(username)
+        if not user_id:
+            logger.error(f"Could not resolve user_id for @{username}")
+            return []
+
+        all_following: list[dict] = []
+        cursor = None
+        page = 0
+        max_pages = 200
+
+        while len(all_following) < limit and page < max_pages:
+            page += 1
+            params = {"user_id": user_id}
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                data = self._get(endpoint, params)
+            except InstagramAPIError as e:
+                logger.warning(
+                    f"Following page {page} failed for @{username}: {e}"
+                )
+                break
+
+            items = []
+            next_cursor = None
+
+            if isinstance(data, dict):
+                items = (
+                    data.get("items", [])
+                    or data.get("users", [])
+                    or data.get("data", [])
+                    or data.get("following", [])
+                )
+                next_cursor = (
+                    data.get("next_cursor")
+                    or data.get("next_max_id")
+                    or data.get("end_cursor")
+                    or data.get("cursor")
+                )
+                if not next_cursor and isinstance(data.get("page_info"), dict):
+                    pi = data["page_info"]
+                    if pi.get("has_next_page"):
+                        next_cursor = pi.get("end_cursor")
+            elif isinstance(data, list):
+                items = data
+
+            if not items:
+                logger.info(
+                    f"Following page {page}: 0 items for @{username}, stopping"
+                )
+                break
+
+            for item in items:
+                if "node" in item and isinstance(item["node"], dict):
+                    item = item["node"]
+
+                uname = (
+                    item.get("username")
+                    or item.get("user_name")
+                    or item.get("userName")
+                    or ""
+                )
+                if not uname:
+                    continue
+
+                all_following.append({
+                    "username": uname,
+                    "full_name": (
+                        item.get("full_name")
+                        or item.get("fullName")
+                        or item.get("name")
+                        or ""
+                    ),
+                    "pk": str(
+                        item.get("pk")
+                        or item.get("id")
+                        or item.get("user_id")
+                        or ""
+                    ),
+                    "is_private": item.get("is_private", False),
+                    "is_verified": item.get("is_verified", False),
+                    "profile_pic_url": item.get("profile_pic_url", ""),
+                })
+
+            logger.info(
+                f"Following @{username} page {page}: "
+                f"+{len(items)} items (total: {len(all_following)})"
+            )
+
+            if not next_cursor:
+                logger.info(f"No next cursor after page {page}, done")
+                break
+
+            if next_cursor == cursor:
+                logger.warning(f"Cursor not advancing, stopping at page {page}")
+                break
+
+            cursor = next_cursor
+
+        logger.info(
+            f"Fetched {len(all_following)} total following for @{username} "
+            f"in {page} pages"
+        )
+        return all_following[:limit]
+
     def get_all_following(
         self, username_or_id: str, limit: int = 0, username: str = ""
     ) -> list[dict]:
         """
-        Fetch the complete following list for a user via Apify.
-
-        Args:
-            username_or_id: Username (preferred) or user ID.
-            limit: Max followings to fetch (0 = use config default).
-            username: Explicit username if username_or_id is numeric.
-
-        Returns:
-            List of dicts with at least a "username" key per followed account.
+        Fetch the complete following list for a user.
+        Tries RapidAPI pagination first, falls back to Apify.
         """
         global _apify_scraper
 
-        # Resolve username — Apify needs a username, not a numeric ID
         uname = username or username_or_id
-        if uname.isdigit():
-            logger.warning(
-                f"get_all_following called with numeric ID '{uname}'. "
-                f"Apify needs a username — attempting profile lookup..."
-            )
-            # Fallback: we can't reverse-lookup, so caller should pass username
-            raise InstagramAPIError(
-                0,
-                f"Apify requires a username, not a numeric ID. "
-                f"Pass username= explicitly."
-            )
 
-        # Lazy-init Apify scraper
+        # Try RapidAPI paginated endpoint first
+        try:
+            result = self.get_following_paginated(uname, limit=limit)
+            if len(result) >= 20:
+                return result
+            logger.warning(
+                f"RapidAPI following returned only {len(result)} for @{uname}, "
+                f"trying Apify fallback..."
+            )
+        except Exception as e:
+            logger.warning(f"RapidAPI following failed for @{uname}: {e}")
+
+        # Fallback to Apify
         if _apify_scraper is None:
             from apify_following import ApifyFollowingScraper
             _apify_scraper = ApifyFollowingScraper()
