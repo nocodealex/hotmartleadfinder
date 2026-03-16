@@ -1,15 +1,12 @@
 """
 Apify integration for Instagram following list scraping.
 
-Strategy:
-  1. Try "thenetaji/instagram-following-scraper" via synchronous endpoint
-     (bypasses empty-dataset bug by returning items in HTTP response).
-  2. Fall back to "data-slayer/instagram-following" if thenetaji fails.
-  3. Pick whichever returns more results.
+Uses "thenetaji/instagram-following-scraper" actor (82.5% success rate).
+The critical fix: input MUST include type="followings" — without it the
+actor "succeeds" but returns 0 items.
 """
 
 import logging
-import math
 import time
 import requests
 
@@ -17,10 +14,8 @@ import config
 
 logger = logging.getLogger(__name__)
 
-THENETAJI_ACTOR = "thenetaji~instagram-following-scraper"
-DATASLAYER_ACTOR = "data-slayer~instagram-following"
+ACTOR_ID = "thenetaji~instagram-following-scraper"
 APIFY_BASE = "https://api.apify.com/v2"
-FOLLOWINGS_PER_PAGE = 50
 
 
 class ApifyFollowingError(Exception):
@@ -50,62 +45,13 @@ class ApifyFollowingScraper:
         """
         Fetch the following list for an Instagram user.
 
-        Tries thenetaji (sync endpoint) first, then data-slayer as fallback.
-        Returns whichever gives more results.
-
         Returns:
             List of dicts with keys: username, full_name, pk,
             is_private, is_verified, profile_pic_url.
         """
         limit = limit or config.MAX_FOLLOWING_TO_FETCH
 
-        # Try primary (thenetaji) via sync endpoint
-        primary_result = []
-        try:
-            primary_result = self._run_thenetaji_sync(username, limit)
-            logger.info(
-                f"[Apify] thenetaji returned {len(primary_result)} for @{username}"
-            )
-            if len(primary_result) >= 20:
-                return primary_result
-        except ApifyFollowingError as e:
-            logger.warning(f"[Apify] thenetaji failed for @{username}: {e}")
-
-        # Try fallback (data-slayer) via async polling
-        fallback_result = []
-        try:
-            fallback_result = self._run_dataslayer(username, limit)
-            logger.info(
-                f"[Apify] data-slayer returned {len(fallback_result)} for @{username}"
-            )
-        except ApifyFollowingError as e:
-            logger.warning(f"[Apify] data-slayer failed for @{username}: {e}")
-
-        # Return whichever got more results
-        if len(primary_result) >= len(fallback_result):
-            best = primary_result
-            source = "thenetaji"
-        else:
-            best = fallback_result
-            source = "data-slayer"
-
-        if not best:
-            raise ApifyFollowingError(
-                f"Both Apify actors failed or returned 0 items for @{username}."
-            )
-
-        logger.info(f"[Apify] Using {source} ({len(best)} items) for @{username}")
-        return best
-
-    # ── thenetaji: synchronous endpoint (items returned in response) ────
-
-    def _run_thenetaji_sync(self, username: str, limit: int) -> list[dict]:
-        """
-        Run thenetaji actor using the sync endpoint that returns dataset
-        items directly in the HTTP response body, bypassing the separate
-        dataset-fetch step that was returning empty.
-        """
-        logger.info(f"[Apify/thenetaji] @{username} limit={limit} (sync mode)")
+        logger.info(f"[Apify] Fetching following for @{username} (limit={limit})")
 
         run_input = {
             "username": [username],
@@ -114,73 +60,9 @@ class ApifyFollowingScraper:
             "profileEnriched": False,
         }
 
-        url = (
-            f"{APIFY_BASE}/acts/{THENETAJI_ACTOR}/run-sync-get-dataset-items"
-            f"?token={self.api_token}&timeout=600&format=json"
-        )
-
+        # Start the actor run
         try:
-            resp = requests.post(
-                url,
-                json=run_input,
-                headers={"Content-Type": "application/json"},
-                timeout=660,
-            )
-            resp.raise_for_status()
-        except requests.RequestException as e:
-            raise ApifyFollowingError(f"thenetaji sync call failed: {e}")
-
-        raw = resp.json()
-
-        if isinstance(raw, list):
-            items = raw
-        elif isinstance(raw, dict):
-            items = raw.get("items", raw.get("data", []))
-            if not items and "id" in raw:
-                raise ApifyFollowingError(
-                    "thenetaji sync returned run metadata instead of items. "
-                    "Actor may have timed out."
-                )
-        else:
-            items = []
-
-        if not items:
-            raise ApifyFollowingError(
-                f"thenetaji sync returned 0 items for @{username}"
-            )
-
-        logger.info(
-            f"[Apify/thenetaji] Got {len(items)} raw items. "
-            f"Sample keys: {list(items[0].keys())}"
-        )
-
-        return self._normalize(items, username)
-
-    # ── data-slayer: async polling ──────────────────────────────────────
-
-    def _run_dataslayer(self, username: str, limit: int) -> list[dict]:
-        max_pages = min(100, max(1, math.ceil(limit / FOLLOWINGS_PER_PAGE)))
-        logger.info(
-            f"[Apify/data-slayer] @{username} limit={limit} maxPages={max_pages}"
-        )
-
-        run_input = {
-            "username": username,
-            "maxPages": max_pages,
-        }
-
-        items = self._start_and_poll(DATASLAYER_ACTOR, run_input, username)
-        return self._normalize(items, username)
-
-    # ── Shared async polling logic ──────────────────────────────────────
-
-    def _start_and_poll(
-        self, actor_id: str, run_input: dict, username: str
-    ) -> list[dict]:
-        actor_label = actor_id.split("~")[0]
-
-        try:
-            start_url = self._api_url(f"/acts/{actor_id}/runs")
+            start_url = self._api_url(f"/acts/{ACTOR_ID}/runs")
             resp = requests.post(
                 start_url,
                 json=run_input,
@@ -191,14 +73,13 @@ class ApifyFollowingScraper:
             run_data = resp.json().get("data", {})
             run_id = run_data.get("id")
             if not run_id:
-                raise ApifyFollowingError(
-                    f"[{actor_label}] No run ID: {resp.text[:300]}"
-                )
+                raise ApifyFollowingError(f"No run ID returned: {resp.text[:300]}")
         except requests.RequestException as e:
-            raise ApifyFollowingError(f"[{actor_label}] Failed to start: {e}")
+            raise ApifyFollowingError(f"Failed to start Apify actor: {e}")
 
-        logger.info(f"[Apify/{actor_label}] Run started: {run_id}")
+        logger.info(f"[Apify] Run started: {run_id}")
 
+        # Poll for completion (up to 30 minutes)
         max_wait = 1800
         poll_interval = 5
         waited = 0
@@ -210,108 +91,120 @@ class ApifyFollowingScraper:
             waited += poll_interval
 
             try:
-                status_url = self._api_url(f"/acts/{actor_id}/runs/{run_id}")
+                status_url = self._api_url(f"/acts/{ACTOR_ID}/runs/{run_id}")
                 resp = requests.get(status_url, timeout=15)
                 resp.raise_for_status()
                 run_info = resp.json().get("data", {})
                 status = run_info.get("status", "UNKNOWN")
             except requests.RequestException as e:
-                logger.warning(f"[Apify/{actor_label}] Poll error: {e}")
+                logger.warning(f"[Apify] Poll error: {e}")
                 continue
 
             if status in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
-                logger.info(
-                    f"[Apify/{actor_label}] Finished: {status} ({waited}s)"
-                )
+                logger.info(f"[Apify] Run finished: {status} (waited {waited}s)")
                 break
 
             if waited % 30 == 0:
-                logger.info(
-                    f"[Apify/{actor_label}] Still running... ({waited}s)"
-                )
+                logger.info(f"[Apify] Still running... ({waited}s)")
 
         if status != "SUCCEEDED":
             raise ApifyFollowingError(
-                f"[{actor_label}] Finished with status: {status}"
+                f"Apify actor finished with status: {status}"
             )
 
+        # Collect items from dataset
+        items = self._collect_items(run_info, username)
+
+        # Normalize
+        return self._normalize(items, username)
+
+    def _collect_items(self, run_info: dict, username: str) -> list[dict]:
+        """Try dataset first, then key-value store, then logs."""
         dataset_id = run_info.get("defaultDatasetId")
-        if not dataset_id:
-            raise ApifyFollowingError(
-                f"[{actor_label}] No dataset ID in run result"
-            )
+        items = []
 
-        try:
-            items_url = (
-                self._api_url(f"/datasets/{dataset_id}/items") + "&format=json"
-            )
-            resp = requests.get(items_url, timeout=120)
-            resp.raise_for_status()
-            raw = resp.json()
-        except requests.RequestException as e:
-            raise ApifyFollowingError(
-                f"[{actor_label}] Failed to fetch dataset: {e}"
-            )
+        # Attempt 1: Default dataset
+        if dataset_id:
+            items = self._fetch_dataset(dataset_id)
+            if items:
+                logger.info(f"[Apify] Got {len(items)} items from dataset")
+                return items
 
-        if isinstance(raw, list):
-            items = raw
-        elif isinstance(raw, dict):
-            items = raw.get("items", raw.get("data", []))
-        else:
-            items = []
+        # Attempt 2: Key-value store OUTPUT
+        kv_id = run_info.get("defaultKeyValueStoreId")
+        if kv_id:
+            items = self._fetch_kv_store(kv_id)
+            if items:
+                logger.info(f"[Apify] Got {len(items)} items from KV store")
+                return items
 
-        # Fallback: key-value store
-        if not items:
-            kv_id = run_info.get("defaultKeyValueStoreId")
-            if kv_id:
-                logger.info(f"[Apify/{actor_label}] Dataset empty, trying KV store")
-                try:
-                    kv_url = self._api_url(
-                        f"/key-value-stores/{kv_id}/records/OUTPUT"
-                    )
-                    kv_resp = requests.get(kv_url, timeout=60)
-                    if kv_resp.status_code == 200:
-                        kv_data = kv_resp.json()
-                        if isinstance(kv_data, list):
-                            items = kv_data
-                        elif isinstance(kv_data, dict):
-                            items = kv_data.get(
-                                "items",
-                                kv_data.get("data", kv_data.get("following", [])),
-                            )
-                        logger.info(
-                            f"[Apify/{actor_label}] Got {len(items)} from KV store"
-                        )
-                except Exception as e:
-                    logger.warning(f"[Apify/{actor_label}] KV fetch failed: {e}")
+        # Attempt 3: Try dataset with different parameters
+        if dataset_id:
+            items = self._fetch_dataset_raw(dataset_id)
+            if items:
+                logger.info(f"[Apify] Got {len(items)} items from raw dataset")
+                return items
 
-        logger.info(
-            f"[Apify/{actor_label}] Got {len(items)} raw items for @{username}"
+        raise ApifyFollowingError(
+            f"Apify actor succeeded but returned 0 items for @{username}. "
+            f"Dataset ID: {dataset_id}."
         )
 
-        if not items:
-            raise ApifyFollowingError(
-                f"[{actor_label}] Succeeded but 0 items for @{username}. "
-                f"Dataset: {dataset_id}."
-            )
+    def _fetch_dataset(self, dataset_id: str) -> list[dict]:
+        """Fetch items from a dataset using the standard endpoint."""
+        try:
+            url = self._api_url(f"/datasets/{dataset_id}/items") + "&format=json"
+            resp = requests.get(url, timeout=120)
+            resp.raise_for_status()
+            raw = resp.json()
 
-        if items:
-            logger.info(
-                f"[Apify/{actor_label}] Sample keys: {list(items[0].keys())}"
-            )
+            if isinstance(raw, list):
+                return raw
+            if isinstance(raw, dict):
+                return raw.get("items", raw.get("data", []))
+        except Exception as e:
+            logger.warning(f"[Apify] Dataset fetch failed: {e}")
+        return []
 
-        return items
+    def _fetch_dataset_raw(self, dataset_id: str) -> list[dict]:
+        """Fetch items without format parameter (some actors need this)."""
+        try:
+            url = self._api_url(f"/datasets/{dataset_id}/items")
+            resp = requests.get(url, timeout=120)
+            resp.raise_for_status()
+            raw = resp.json()
 
-    # ── Normalize to common format ──────────────────────────────────────
+            if isinstance(raw, list):
+                return raw
+            if isinstance(raw, dict):
+                return raw.get("items", raw.get("data", []))
+        except Exception as e:
+            logger.warning(f"[Apify] Raw dataset fetch failed: {e}")
+        return []
+
+    def _fetch_kv_store(self, kv_id: str) -> list[dict]:
+        """Fetch items from the key-value store OUTPUT key."""
+        try:
+            url = self._api_url(f"/key-value-stores/{kv_id}/records/OUTPUT")
+            resp = requests.get(url, timeout=60)
+            if resp.status_code != 200:
+                return []
+            kv_data = resp.json()
+
+            if isinstance(kv_data, list):
+                return kv_data
+            if isinstance(kv_data, dict):
+                return kv_data.get("items", kv_data.get("data", kv_data.get("following", [])))
+        except Exception as e:
+            logger.warning(f"[Apify] KV store fetch failed: {e}")
+        return []
 
     @staticmethod
     def _normalize(items: list[dict], username: str) -> list[dict]:
+        """Normalize raw Apify items to a common format."""
         following = []
         for item in items:
-            if "message" in item and "username" not in item and "userName" not in item:
-                logger.warning(
-                    f"[Apify] Actor message: {item.get('message', '')[:200]}"
-                )
+            if "message" in item and "username" not in item:
                 continue
 
             uname = (
@@ -352,9 +245,10 @@ class ApifyFollowingScraper:
         )
 
         if len(items) > 0 and len(following) == 0:
+            sample_keys = list(items[0].keys()) if items else []
             raise ApifyFollowingError(
                 f"Apify returned {len(items)} items but none had a username. "
-                f"Keys found: {list(items[0].keys())}"
+                f"Keys: {sample_keys}"
             )
 
         return following
