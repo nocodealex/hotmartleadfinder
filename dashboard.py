@@ -469,12 +469,23 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
             return
         db.save_following_cache(user, partner, data)
 
-    # Step 1: Fetch followings (RapidAPI → Apify fallback → cache fallback)
+    # Step 1: Fetch followings via Apify (with cache)
     with st.status("Fetching partner followings...", expanded=True) as status:
-        from instagram_client import InstagramClient
-        ig_client = InstagramClient(api_key=keys.get("rapidapi_key"))
+        from apify_following import ApifyFollowingScraper, ApifyFollowingError
         all_followings = {}
         total_accounts = 0
+
+        # Test Apify connection first
+        try:
+            scraper = ApifyFollowingScraper(api_token=keys.get("apify_api_token"))
+            if scraper.test_connection():
+                st.write("Apify connection: OK")
+            else:
+                st.error("Apify connection FAILED. Check your API token in Settings.")
+                return
+        except Exception as e:
+            st.error(f"Apify error: {e}")
+            return
 
         for i, partner in enumerate(partners):
             st.write(f"Fetching @{partner} followings ({i+1}/{len(partners)})...")
@@ -482,37 +493,30 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
                 if not force_refresh:
                     cached = cache_load(partner)
                     if cached and len(cached) > 0:
-                        count = len(cached)
-                        total_accounts += count
+                        total_accounts += len(cached)
                         all_followings[partner] = cached
-                        st.write(f"  @{partner}: {count} followings (cached)")
+                        st.write(f"  @{partner}: {len(cached)} followings (cached)")
                         continue
 
-                following = ig_client.get_following_paginated(partner, limit=0)
+                st.write(f"  Scraping via Apify (this takes 2-5 min per partner)...")
+                following = scraper.get_following(partner, limit=0)
                 count = len(following)
-
-                if count < 20 and keys.get("apify_api_token"):
-                    st.write(f"  RapidAPI returned {count}, trying Apify...")
-                    from apify_following import ApifyFollowingScraper
-                    scraper = ApifyFollowingScraper(api_token=keys.get("apify_api_token"))
-                    apify_result = scraper.get_following(partner, limit=0)
-                    if len(apify_result) > count:
-                        following = apify_result
-                        count = len(following)
-
                 total_accounts += count
                 all_followings[partner] = following
                 if count > 0:
-                    st.write(f"  @{partner}: {count} followings found")
+                    st.write(f"  @{partner}: **{count} followings found**")
                     cache_save(partner, following)
                 else:
-                    cached_fallback = cache_load(partner)
-                    if cached_fallback and len(cached_fallback) > 0:
-                        all_followings[partner] = cached_fallback
-                        total_accounts += len(cached_fallback)
-                        st.write(f"  @{partner}: using {len(cached_fallback)} cached followings")
-                    else:
-                        st.warning(f"  @{partner}: 0 followings (account may be private)")
+                    st.warning(f"  @{partner}: 0 followings (account may be private)")
+            except ApifyFollowingError as e:
+                st.error(f"  @{partner}: Apify error - {e}")
+                cached_fallback = cache_load(partner)
+                if cached_fallback and len(cached_fallback) > 0:
+                    all_followings[partner] = cached_fallback
+                    total_accounts += len(cached_fallback)
+                    st.write(f"  @{partner}: using {len(cached_fallback)} cached followings as fallback")
+                else:
+                    all_followings[partner] = []
             except Exception as e:
                 st.error(f"  @{partner}: Error - {e}")
                 cached_fallback = cache_load(partner)
@@ -530,7 +534,7 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
             st.error(
                 "All partners returned 0 followings. Possible causes:\n"
                 "- Partner accounts may be private\n"
-                "- Check your RapidAPI key in Settings\n"
+                "- Apify actor may be having issues\n"
                 "- Try again in a few minutes"
             )
             return
