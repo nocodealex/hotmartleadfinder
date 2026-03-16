@@ -556,7 +556,7 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
 
     try:
         with st.spinner("Qualifying prospects — fetching profiles, running prefilter, analyzing with Claude..."):
-            prospects = find_prospects(
+            result = find_prospects(
                 partners=partners,
                 skip_new=skip_new,
                 exclude_usernames=exclude,
@@ -569,6 +569,35 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
                 force_refresh=False,
             )
 
+        if isinstance(result, tuple):
+            prospects, stats = result
+        else:
+            prospects, stats = result, {}
+
+        # Show pipeline stats
+        if stats:
+            with st.expander("Scan Details", expanded=True):
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Total Accounts", stats.get("total_unique", 0))
+                col2.metric("Passed Prefilter", stats.get("new_analyzed", 0))
+                col3.metric("Prospects Found", stats.get("prospects_found", 0))
+
+                breakdown = []
+                if stats.get("skipped_private"):
+                    breakdown.append(f"Private accounts: {stats['skipped_private']}")
+                if stats.get("skipped_prefilter"):
+                    breakdown.append(f"Filtered out (wrong niche): {stats['skipped_prefilter']}")
+                if stats.get("skipped_no_profile"):
+                    breakdown.append(f"Profile not found: {stats['skipped_no_profile']}")
+                if stats.get("skipped_api_error"):
+                    breakdown.append(f"API errors: {stats['skipped_api_error']}")
+                if stats.get("skipped_whop_seller"):
+                    breakdown.append(f"Already Whop sellers: {stats['skipped_whop_seller']}")
+                if stats.get("already_known"):
+                    breakdown.append(f"Already known leads: {stats['already_known']}")
+                if breakdown:
+                    st.markdown("**Filtering breakdown:**\n" + "\n".join(f"- {b}" for b in breakdown))
+
         if prospects:
             total_value = sum(p.get("estimated_deal_value", 0) for p in prospects)
             st.success(
@@ -578,10 +607,11 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
             )
         else:
             st.warning(
-                "No prospects found. This can mean:\n"
-                "- All accounts were filtered out (not in digital marketing niche)\n"
+                "No prospects found. Check the scan details above to see why.\n\n"
+                "Common causes:\n"
+                "- All accounts filtered out (not in digital marketing niche)\n"
                 "- Make sure 'Skip new analysis' is **unchecked** for a full scan\n"
-                "- The RapidAPI key may be invalid (check Settings tab)"
+                "- If 'Profile not found' is high, your RapidAPI key may be invalid"
             )
     except Exception as e:
         st.error(f"Scan failed: {e}\n\nCheck that your API keys are valid in the Settings tab.")
