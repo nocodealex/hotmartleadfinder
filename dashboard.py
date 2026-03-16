@@ -10,9 +10,12 @@ Usage:
 """
 
 import json
+import logging
 from datetime import datetime, timezone
 
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 import pandas as pd
 
 import config
@@ -455,29 +458,21 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
         return db.load_following_cache(user, partner)
 
     def cache_save(partner, data):
+        if not data:
+            return
+        existing = db.load_following_cache(user, partner)
+        if existing and len(existing) > len(data):
+            logger.info(
+                f"Skipping cache save for @{partner}: "
+                f"existing ({len(existing)}) > new ({len(data)})"
+            )
+            return
         db.save_following_cache(user, partner, data)
 
-    # Step 1: Test Apify connection
-    with st.status("Testing API connections...", expanded=True) as status:
-        from apify_following import ApifyFollowingScraper, ApifyFollowingError
-        try:
-            test_scraper = ApifyFollowingScraper(api_token=keys.get("apify_api_token"))
-            apify_ok = test_scraper.test_connection()
-            if apify_ok:
-                st.write("Apify connection: OK")
-            else:
-                st.error("Apify connection FAILED. Check your API token in Settings.")
-                return
-        except ApifyFollowingError as e:
-            st.error(f"Apify error: {e}")
-            return
-        except Exception as e:
-            st.error(f"Apify connection error: {e}")
-            return
-
-        # Step 2: Load or scrape followings with visible progress
-        status.update(label="Scraping partner followings...", expanded=True)
-        scraper = ApifyFollowingScraper(api_token=keys.get("apify_api_token"))
+    # Step 1: Fetch followings (RapidAPI → Apify fallback → cache fallback)
+    with st.status("Fetching partner followings...", expanded=True) as status:
+        from instagram_client import InstagramClient
+        ig_client = InstagramClient(api_key=keys.get("rapidapi_key"))
         all_followings = {}
         total_accounts = 0
 
@@ -493,15 +488,31 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
                         st.write(f"  @{partner}: {count} followings (cached)")
                         continue
 
-                following = scraper.get_following(partner, limit=0)
+                following = ig_client.get_following_paginated(partner, limit=0)
                 count = len(following)
+
+                if count < 20 and keys.get("apify_api_token"):
+                    st.write(f"  RapidAPI returned {count}, trying Apify...")
+                    from apify_following import ApifyFollowingScraper
+                    scraper = ApifyFollowingScraper(api_token=keys.get("apify_api_token"))
+                    apify_result = scraper.get_following(partner, limit=0)
+                    if len(apify_result) > count:
+                        following = apify_result
+                        count = len(following)
+
                 total_accounts += count
                 all_followings[partner] = following
                 if count > 0:
                     st.write(f"  @{partner}: {count} followings found")
                     cache_save(partner, following)
                 else:
-                    st.warning(f"  @{partner}: 0 followings returned (account may be private)")
+                    cached_fallback = cache_load(partner)
+                    if cached_fallback and len(cached_fallback) > 0:
+                        all_followings[partner] = cached_fallback
+                        total_accounts += len(cached_fallback)
+                        st.write(f"  @{partner}: using {len(cached_fallback)} cached followings")
+                    else:
+                        st.warning(f"  @{partner}: 0 followings (account may be private)")
             except Exception as e:
                 st.error(f"  @{partner}: Error - {e}")
                 cached_fallback = cache_load(partner)
@@ -519,12 +530,11 @@ def _run_scan(user: str, partners: list[str], skip_new: bool, force_refresh: boo
             st.error(
                 "All partners returned 0 followings. Possible causes:\n"
                 "- Partner accounts may be private\n"
-                "- Apify actor may be having issues\n"
+                "- Check your RapidAPI key in Settings\n"
                 "- Try again in a few minutes"
             )
             return
 
-        # Step 3: Run the full qualification pipeline
         status.update(label=f"Qualifying {total_accounts} accounts...", expanded=True)
 
     st.info(
